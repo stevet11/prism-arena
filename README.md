@@ -5,12 +5,16 @@ synthesized sound effects and music, and gamepad rumble.
 
 ## Build & run
 
+SDL3 comes from [Conan](https://conan.io) 2, which builds it and links it in statically:
+
 ```sh
+conan install . --build=missing -of build/conan   # once, or after changing conanfile.txt
 make && ./prism            # --fullscreen, --no-rumble
 ```
 
-If `libsdl3-dev` isn't installed, the build uses the SDL3 headers in `third_party/` and links
-them against the SDL3 runtime already on the system (`libSDL3.so.0`).
+On Linux, ConanCenter's `xorg/system` package needs the X11/XCB dev headers installed first
+(on Ubuntu, the `libx11-dev` and `libxcb-*-dev` packages; `conan install` names any that are
+missing). If no Conan build is present, the Makefile uses a system SDL3 (`libsdl3-dev`) instead.
 
 ## Controls
 
