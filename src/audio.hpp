@@ -8,7 +8,7 @@
 #include <vector>
 
 enum class Sfx : int {
-    Shoot, Hit, Explode, BigExplode, Spawn, Bomb, Death, ExtraLife, MultUp, Charge, Absorb, Count
+    Shoot, Ping, Explode, BigExplode, Spawn, Bomb, Death, Bonus, Charge, Count
 };
 
 class Audio {

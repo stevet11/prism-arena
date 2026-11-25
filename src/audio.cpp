@@ -25,7 +25,8 @@ std::vector<float> synth(float dur, F f) {
     return b;
 }
 
-const int kLimit[(int)Sfx::Count] = {3, 6, 6, 3, 4, 2, 1, 1, 1, 3, 3};
+//                                   Shoot Ping Explode Big Spawn Bomb Death Bonus Charge
+const int kLimit[(int)Sfx::Count] = {3,    6,   6,      3,  4,    2,   1,    1,    3};
 }  // namespace
 
 float Audio::noise() {
@@ -37,70 +38,53 @@ float Audio::noise() {
 
 bool Audio::init() {
     using S = Sfx;
-    bufs[(int)S::Shoot] = synth(0.07f, [ph = 0.f](float t, float d) mutable {
-        float f = 260 + 1200 * std::exp(-t * 45);
-        ph += f / SR;
-        float s = 0.6f * std::sin(TAU * ph) + 0.25f * (std::sin(TAU * ph) > 0 ? 1.f : -1.f);
-        float k = 1 - t / d;
-        return s * k * k * 0.22f;
+    // Recipes match the Python prism-arena (pygame) sound set.
+    auto lpc = [](float a22k) { return 1 - std::pow(1 - a22k, 22050.f / SR); };  // one-pole coeff at 22.05k -> SR
+    struct Sweep {  // exponential frequency glide f0 -> f1 over d seconds
+        float f0, f1, d;
+        bool square = false;
+        float ph = 0;
+        float operator()(float t) {
+            ph += f0 * std::pow(f1 / f0, t / d) / SR;
+            float w = std::sin(TAU * ph);
+            return square ? (w > 0 ? 0.6f : w < 0 ? -0.6f : 0.f) : w;
+        }
+    };
+    struct Noise {  // low-passed white noise
+        float a, y = 0;
+        float operator()() { return y += a * (rnd() - y); }
+    };
+    auto vol = [](float x, float v) { return std::clamp(x * v, -1.f, 1.f); };
+
+    bufs[(int)S::Shoot] = synth(0.07f, [sw = Sweep{1400, 380, 0.07f, true}, vol](float t, float) mutable {
+        return vol(sw(t) * std::exp(-t * 40), 0.10f);
     });
-    bufs[(int)S::Hit] = synth(0.12f, [ph = 0.f, lp = 0.f](float t, float d) mutable {
-        lp += 0.5f * (rnd() - lp);
-        ph += (700 * std::exp(-t * 20) + 180) / SR;
-        return (lp * 0.35f * std::exp(-t * 40) + std::sin(TAU * ph) * 0.25f * (1 - t / d));
+    bufs[(int)S::Explode] = synth(0.35f, [n = Noise{lpc(0.25f)}, sw = Sweep{220, 50, 0.35f}, vol](float t, float) mutable {
+        return vol(n() * std::exp(-t * 11) * 2.2f + sw(t) * std::exp(-t * 9) * 0.6f, 0.35f);
     });
-    bufs[(int)S::Explode] = synth(0.65f, [ph = 0.f, lp = 0.f](float t, float) mutable {
-        float c = 0.04f + 0.35f * std::exp(-t * 6);
-        lp += c * (rnd() - lp);
-        ph += (38 + 90 * std::exp(-t * 16)) / SR;
-        return (lp * 1.4f * std::exp(-t * 5.5f) + std::sin(TAU * ph) * 0.6f * std::exp(-t * 9)) * 0.45f;
+    bufs[(int)S::Death] = synth(1.6f, [n = Noise{lpc(0.08f)}, sw = Sweep{140, 28, 1.6f}, vol](float t, float) mutable {
+        return vol(n() * std::exp(-t * 2.6f) * 4 + sw(t) * std::exp(-t * 2) * 0.8f, 0.6f);
     });
-    bufs[(int)S::BigExplode] = synth(1.6f, [ph = 0.f, lp = 0.f, lp2 = 0.f](float t, float) mutable {
-        float c = 0.02f + 0.25f * std::exp(-t * 3);
-        lp += c * (rnd() - lp);
-        lp2 += c * (lp - lp2);
-        ph += (30 + 70 * std::exp(-t * 6)) / SR;
-        return (lp2 * 2.5f * std::exp(-t * 2.4f) + std::sin(TAU * ph) * 0.7f * std::exp(-t * 3.5f)) * 0.5f;
+    bufs[(int)S::Bomb] = synth(1.1f, [n = Noise{lpc(0.15f)}, sw = Sweep{900, 35, 1.1f}, vol](float t, float) mutable {
+        return vol(sw(t) * std::exp(-t * 2.5f) + n() * std::exp(-t * 3) * 2.5f, 0.55f);
     });
-    bufs[(int)S::Spawn] = synth(0.2f, [ph = 0.f](float t, float d) mutable {
-        float k = t / d;
-        ph += (220 + 900 * k * k) / SR;
-        return std::sin(TAU * ph) * std::sin(PI * k) * 0.09f;
+    bufs[(int)S::Spawn] = synth(0.18f, [sw = Sweep{180, 720, 0.18f}, vol](float t, float d) mutable {
+        return vol(sw(t) * std::sin(PI * t / d), 0.10f);
     });
-    bufs[(int)S::Bomb] = synth(2.4f, [ph = 0.f, lp = 0.f, lp2 = 0.f](float t, float) mutable {
-        float c = 0.01f + 0.15f * std::exp(-t * 1.6f);
-        lp += c * (rnd() - lp);
-        lp2 += c * (lp - lp2);
-        ph += (28 + 60 * std::exp(-t * 2.5f)) / SR;
-        return (lp2 * 3.f * std::exp(-t * 1.5f) + std::sin(TAU * ph) * 0.8f * std::exp(-t * 1.8f)) * 0.55f;
+    bufs[(int)S::BigExplode] = synth(0.6f, [n = Noise{lpc(0.12f)}, sw = Sweep{300, 40, 0.6f}, vol](float t, float) mutable {
+        return vol(n() * std::exp(-t * 5) * 3.5f + sw(t) * std::exp(-t * 4), 0.5f);
     });
-    bufs[(int)S::Death] = synth(1.8f, [ph = 0.f, lp = 0.f](float t, float) mutable {
-        float f = 340 * std::exp(-t * 2.2f) + 28;
-        ph += f / SR;
-        float saw = 2 * (ph - std::floor(ph)) - 1;
-        lp += 0.08f * (rnd() - lp);
-        return (saw * 0.35f + lp * 1.2f) * std::exp(-t * 1.9f) * 0.5f;
+    bufs[(int)S::Bonus] = synth(0.36f, [vol](float t, float) {
+        const float notes[4] = {523, 659, 784, 1047};
+        int i = std::min(3, int(t / 0.09f));
+        float tt = t - i * 0.09f, w = std::sin(TAU * notes[i] * tt);
+        return vol((w > 0 ? 0.5f : w < 0 ? -0.5f : 0.f) * std::exp(-tt * 10), 0.3f);
     });
-    bufs[(int)S::ExtraLife] = synth(0.75f, [ph = 0.f](float t, float) mutable {
-        static const float notes[4] = {523.25f, 659.25f, 783.99f, 1046.5f};
-        int i = std::min(3, int(t / 0.11f));
-        ph += notes[i] / SR;
-        float s = std::sin(TAU * ph) + 0.3f * std::sin(TAU * ph * 2);
-        return s * std::exp(-(t - i * 0.11f) * (i == 3 ? 5.f : 14.f)) * 0.16f;
+    bufs[(int)S::Ping] = synth(0.05f, [vol](float t, float) {
+        return vol(std::sin(TAU * 1800 * t) * std::exp(-t * 60), 0.12f);
     });
-    bufs[(int)S::MultUp] = synth(0.22f, [ph = 0.f](float t, float d) mutable {
-        ph += (t < 0.07f ? 880.f : 1318.5f) / SR;
-        return std::sin(TAU * ph) * (1 - t / d) * 0.15f;
-    });
-    bufs[(int)S::Charge] = synth(0.65f, [ph = 0.f](float t, float d) mutable {
-        float k = t / d;
-        ph += (140 + 760 * k * k) / SR;
-        float saw = 2 * (ph - std::floor(ph)) - 1;
-        return saw * k * (1 - std::pow(k, 8.f)) * 0.07f;
-    });
-    bufs[(int)S::Absorb] = synth(0.22f, [ph = 0.f](float t, float d) mutable {
-        ph += (950 * std::exp(-t * 9) + 120) / SR;
-        return std::sin(TAU * ph) * (1 - t / d) * 0.16f;
+    bufs[(int)S::Charge] = synth(0.5f, [sw = Sweep{200, 900, 0.5f, true}, vol](float t, float) mutable {
+        return vol(sw(t) * 0.4f * std::min(1.f, t * 8), 0.10f);
     });
 
     mtx = SDL_CreateMutex();

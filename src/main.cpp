@@ -1,11 +1,13 @@
-// PRISM — a neon twin-stick arena shooter. C++17 + SDL3.
+// PRISM ARENA — a neon twin-stick arena shooter. C++17 + SDL3.
+// A port of the Python/pygame prism-arena, plus music and stereo sound.
 //
-// Gamepad: left stick move, right stick aim & fire, LB/RB/LT/RT bomb,
-//          Start pause, A confirm, Back quit/title, Y toggle music.
-// Keyboard/mouse: WASD move, mouse (hold LMB) or arrow keys fire,
-//          Space / RMB bomb, Esc pause, Enter confirm, M music, F11 fullscreen.
+// Gamepad: left stick move, right stick aim & fire, RB/LB/RT/LT bomb,
+//          Start pause/start, A start/continue, Back quit to title (from pause) / quit (from title),
+//          Y toggle music.
+// Keyboard/mouse: WASD move, mouse (hold LMB) or arrow keys to aim & fire,
+//          Space/RMB bomb, Esc pause, Enter start, M music, F11 fullscreen, F3 fps.
 //
-// Options: --fullscreen  --no-rumble
+// Options: --fullscreen / -f  --no-rumble (or PRISM_NO_RUMBLE=1)
 // Testing: --autoplay (bot plays)  --shot FILE.bmp --shot-at SECONDS (save frame & exit)
 //          Test modes never open the gamepad, so they never rumble it.
 
@@ -16,6 +18,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
@@ -167,6 +170,14 @@ struct Draw {
             prev = q;
         }
     }
+    void arc(V2 p, float r, float a0, float a1, float w, Col c, int seg = 12) {
+        V2 prev = p + fromAng(a0) * r;
+        for (int i = 1; i <= seg; ++i) {
+            V2 q = p + fromAng(a0 + (a1 - a0) * i / seg) * r;
+            line(prev, q, w, c);
+            prev = q;
+        }
+    }
     void flush() {
         if (!idx.empty())
             SDL_RenderGeometry(ren, tex, vtx.data(), int(vtx.size()), idx.data(), int(idx.size()));
@@ -209,32 +220,30 @@ std::string commas(long long v) {
     return out;
 }
 
-// ---------------------------------------------------------------- shapes
+// ---------------------------------------------------------------- shapes & colours
 std::vector<V2> ngon(int n, float r, float ph = 0) {
     std::vector<V2> v;
     for (int i = 0; i < n; ++i) v.push_back(fromAng(ph + TAU * i / n) * r);
     return v;
 }
-std::vector<V2> starShape(int n, float r1, float r2) {
+std::vector<V2> star(int n, float r1, float r2, float ph = 0) {
     std::vector<V2> v;
-    for (int i = 0; i < n * 2; ++i) v.push_back(fromAng(-PI / 2 + PI * i / n) * (i % 2 ? r2 : r1));
+    for (int i = 0; i < n * 2; ++i) v.push_back(fromAng(ph + i * TAU / (n * 2)) * (i % 2 == 0 ? r1 : r2));
     return v;
 }
-const std::vector<V2> SH_PLAYER = {{17, 0}, {-11, 11}, {-5, 0}, {-11, -11}};
-const std::vector<V2> SH_DRIFTER = ngon(3, 17);
-const std::vector<V2> SH_DRIFTER_IN = ngon(3, 7, PI);
-const std::vector<V2> SH_SEEKER = {{16, 0}, {0, 9}, {-12, 0}, {0, -9}};
-const std::vector<V2> SH_WEAVER = ngon(6, 15);
-const std::vector<V2> SH_WEAVER_IN = ngon(3, 8);
-const std::vector<V2> SH_SPLITTER = starShape(5, 19, 8);
-const std::vector<V2> SH_SHARD = {{10, 0}, {-7, 7}, {-4, 0}, {-7, -7}};
-const std::vector<V2> SH_LANCER = {{24, 0}, {0, 6}, {-14, 0}, {0, -6}};
+inline Col rgb(int r, int g, int b) { return {r / 255.f, g / 255.f, b / 255.f, 1}; }
+inline Col hsvDeg(float h, float s, float v) { return hsv(h / 360.f, s, v); }
+inline float deg(float d) { return d * PI / 180.f; }
+
+const std::vector<V2> SH_PLAYER = {{19, 0}, {-7, -13}, {-14, -7}, {-5, 0}, {-14, 7}, {-7, 13}};
+const std::vector<V2> SH_PLAYER_IN = {{9, 0}, {-3, -5}, {-3, 5}};
+constexpr float PLAYER_R = 11, PLAYER_SPEED = 430, BULLET_SPEED = 980;
 
 // ---------------------------------------------------------------- grid
 // Spring-mass grid: every node is a displacement from its rest position,
 // pulled back home and coupled to its neighbours, so pushes ripple outward.
 struct Grid {
-    int nx = 39, ny = 22;
+    int nx = 39, ny = 22;  // ~32 px spacing
     float sx = 0, sy = 0;
     std::vector<V2> d, v, acc;
 
@@ -247,22 +256,22 @@ struct Grid {
     }
     V2 rest(int i, int j) const { return {AX0 + i * sx, AY0 + j * sy}; }
     void update(float dt) {
-        const float KN = 700, KR = 40, DAMP = 3.2f;
         for (int j = 1; j < ny - 1; ++j)
             for (int i = 1; i < nx - 1; ++i) {
                 int k = j * nx + i;
                 V2 lap = d[k - 1] + d[k + 1] + d[k - nx] + d[k + nx] - d[k] * 4;
-                acc[k] = lap * KN - d[k] * KR - v[k] * DAMP;
+                acc[k] = lap * 240 - d[k] * 14 - v[k] * 3.2f;
             }
         for (int j = 1; j < ny - 1; ++j)
             for (int i = 1; i < nx - 1; ++i) {
                 int k = j * nx + i;
                 v[k] += acc[k] * dt;
                 d[k] += v[k] * dt;
-                float l = len(d[k]);
-                if (l > 50) d[k] *= 50 / l;
+                v[k].x = std::clamp(v[k].x, -2500.f, 2500.f);
+                v[k].y = std::clamp(v[k].y, -2500.f, 2500.f);
             }
     }
+    // f(node, unit vector from c to node, 1 - dist/R)
     template <class F>
     void around(V2 c, float R, F f) {
         int i0 = std::max(1, int((c.x - R - AX0) / sx)), i1 = std::min(nx - 2, int((c.x + R - AX0) / sx) + 1);
@@ -271,63 +280,69 @@ struct Grid {
             for (int i = i0; i <= i1; ++i) {
                 int k = j * nx + i;
                 V2 r = rest(i, j) + d[k] - c;
-                float dist = len(r);
-                if (dist < R) f(k, dist > 0.01f ? r / dist : V2{0, 0}, 1 - dist / R);
+                float dist = len(r) + 1;
+                if (dist < R) f(k, r / dist, 1 - dist / R);
             }
     }
-    // positive strength pushes outward, negative pulls inward (velocity kick)
+    // positive strength pushes points away, negative pulls them in (velocity kick)
     void impulse(V2 c, float s, float R) {
         around(c, R, [&](int k, V2 dir, float f) { v[k] += dir * (s * f * f); });
     }
-    // sustained inward pull (acceleration)
-    void pull(V2 c, float s, float R, float dt) {
-        around(c, R, [&](int k, V2 dir, float f) { v[k] -= dir * (s * f * dt); });
+    // bullets drag the grid along with them
+    void pushBullet(V2 p, V2 bv, float dt) {
+        around(p, 40, [&](int k, V2, float f) { v[k] += bv * (f * (2 - f) * 0.9f * dt); });
     }
     void draw(Draw& dr, float t) {
-        const Col cold{0.10f, 0.16f, 0.55f}, hot{0.55f, 0.75f, 1.0f};
+        float hue = 225 + 15 * std::sin(t * 0.2f);
+        Col minor = hsvDeg(hue, 0.8f, 0.22f), major = hsvDeg(hue, 0.7f, 0.42f);
         auto P = [&](int i, int j) { return rest(i, j) + d[j * nx + i]; };
-        auto seg = [&](int i0, int j0, int i1, int j1, bool major) {
-            float e = clamp01((len(d[j0 * nx + i0]) + len(d[j1 * nx + i1])) * 0.03f);
-            float base = major ? 0.42f : 0.22f;
-            dr.line(P(i0, j0), P(i1, j1), major ? 1.1f : 0.8f, mix(cold, hot, e) * (base + e * 0.7f));
+        auto lineCol = [&](bool isMajor, float hot) {
+            Col c = isMajor ? major : minor;
+            return hot > 6 ? c * (1 + std::min(2.f, hot / 25)) : c;
         };
-        (void)t;
-        for (int j = 0; j < ny; ++j)
-            for (int i = 0; i < nx; ++i) {
-                if (i + 1 < nx) seg(i, j, i + 1, j, j % 4 == 0);
-                if (j + 1 < ny) seg(i, j, i, j + 1, i % 4 == 0);
-            }
+        for (int j = 0; j < ny; ++j) {
+            float hot = 0;
+            for (int i = 0; i < nx; ++i) hot = std::max(hot, len(d[j * nx + i]));
+            Col c = lineCol(j % 4 == 0, hot);
+            for (int i = 0; i + 1 < nx; ++i) dr.line(P(i, j), P(i + 1, j), j % 4 == 0 ? 1.2f : 0.8f, c);
+        }
+        for (int i = 0; i < nx; ++i) {
+            float hot = 0;
+            for (int j = 0; j < ny; ++j) hot = std::max(hot, len(d[j * nx + i]));
+            Col c = lineCol(i % 4 == 0, hot);
+            for (int j = 0; j + 1 < ny; ++j) dr.line(P(i, j), P(i, j + 1), i % 4 == 0 ? 1.2f : 0.8f, c);
+        }
     }
 };
 
 // ---------------------------------------------------------------- entities
 enum EType { DRIFTER, SEEKER, WEAVER, SPLITTER, SHARD, LANCER, SINGULARITY, NUM_TYPES };
 struct EnemyDef {
-    float r;
-    int hp;
-    int score;
     Col col;
+    float r;
+    int hp, score;
+    float spawnTime;
+    std::vector<std::vector<V2>> shapes;
 };
 const EnemyDef DEFS[NUM_TYPES] = {
-    {16, 1, 50, {1.0f, 0.72f, 0.15f}},    // drifter: amber triangle, wanders
-    {13, 1, 75, {1.0f, 0.25f, 0.85f}},    // seeker: magenta kite, homes in
-    {15, 1, 100, {0.3f, 1.0f, 0.45f}},    // weaver: green hex, dodges shots
-    {18, 1, 100, {1.0f, 0.45f, 0.1f}},    // splitter: orange star, breaks into shards
-    {9, 1, 25, {1.0f, 0.78f, 0.4f}},      // shard: spirals in
-    {14, 2, 150, {1.0f, 0.18f, 0.22f}},   // lancer: red needle, aims then dashes
-    {26, 16, 1000, {0.7f, 0.5f, 1.0f}},   // singularity: gravity well
+    {rgb(60, 200, 255), 15, 1, 25, 0.7f, {ngon(6, 16), ngon(3, 7)}},                                   // drifter
+    {rgb(255, 150, 40), 13, 1, 50, 0.7f, {{{15, 0}, {-10, -12}, {-10, 12}}, {{4, 0}, {-5, -5}, {-5, 5}}}},  // seeker
+    {rgb(130, 255, 70), 14, 1, 100, 0.7f, {{{-13, -13}, {13, 13}, {13, -13}, {-13, 13}}}},              // weaver
+    {rgb(255, 60, 220), 18, 2, 100, 0.7f, {ngon(5, 19), ngon(5, 8, PI)}},                               // splitter
+    {rgb(255, 130, 245), 9, 1, 30, 0.0f, {{{10, 0}, {-6, -7}, {-6, 7}}}},                               // shard
+    {rgb(255, 235, 60), 15, 1, 150, 0.7f, {star(4, 19, 6)}},                                            // lancer
+    {rgb(255, 50, 70), 22, 16, 500, 1.0f, {}},                                                          // singularity
 };
-constexpr float SPAWN_TIME = 0.6f;
-constexpr float SING_RANGE = 380.f;
+enum LancerState { L_DRIFT, L_AIM, L_DASH };
 
 struct Enemy {
     EType type = DRIFTER;
-    V2 p, v, dir{1, 0};
-    float ang = 0, spin = 0, r = 16, t = 0, timer = 0, side = 1, hitFlash = 0;
-    float spawnT = SPAWN_TIME;
-    int hp = 1, state = 0, fed = 0;
-    bool dead = false, charged = false;
-    bool active() const { return !dead && spawnT <= 0; }
+    V2 p, v, aim{1, 0};
+    float ang = 0, spawn = 0, flash = 0, t = 0, speed = 1, spin = 0, timer = 0, age = 0;
+    int hp = 1, dir = 1, state = L_DRIFT;
+    bool dead = false;
+    bool spawning() const { return spawn > 0; }
+    float r() const { return DEFS[type].r; }
 };
 struct Bullet {
     V2 p, v;
@@ -336,13 +351,22 @@ struct Bullet {
 struct Particle {
     V2 p, v;
     Col c;
-    float life, maxLife, w;
+    float life, maxLife;
 };
 struct Floater {
     V2 p;
     std::string s;
-    float t;
     Col c;
+    float life;
+};
+struct Banner {
+    std::string s;
+    Col c;
+    float life;
+};
+struct Wave {
+    V2 c;
+    float r;
 };
 
 enum class Mode { Title, Play, Paused, GameOver };
@@ -355,10 +379,13 @@ struct Options {
 };
 
 struct Game {
+    static constexpr int MULT_STEPS[9] = {10, 25, 50, 100, 175, 275, 400, 600, 850};
+    static constexpr long long WEAPON_STEPS[3] = {25000, 90000, 250000};
+
     Options opt;
     SDL_Window* win = nullptr;
     SDL_Renderer* ren = nullptr;
-    SDL_Texture* scene = nullptr;
+    SDL_Texture *scene = nullptr, *frame = nullptr;
     SDL_Texture* bloom[4] = {};
     Draw dr;
     Audio audio;
@@ -368,34 +395,33 @@ struct Game {
     std::string prefPath;
 
     Mode mode = Mode::Title;
-    float modeT = 0, clock = 0;
+    float clock = 0, titleTimer = 0, shake = 0;
+    int sfxUsed[(int)Sfx::Count] = {};
+    bool showFps = false;
+    float fps = 0, fpsT = 0;
+    int fpsFrames = 0;
 
     // player
-    V2 pp{W / 2.f, H / 2.f}, pv;
-    float pang = -PI / 2, fireT = 0, invT = 0, deadT = 0;
+    V2 pp, pv;
+    float pang = 0, invuln = 0, cooldown = 0, respawn = 0;
     bool alive = true;
 
-    int lives = 3, bombs = 3, streak = 0, mult = 1;
-    long long score = 0, hiscore = 0, nextLife = 100000, nextBomb = 75000;
+    long long score = 0, hiscore = 0, nextLife = 75000, nextBomb = 100000;
+    int lives = 3, bombs = 3, streak = 0, weapon = 0;
+    float gameT = 0, spawnTimer = 0, eventTimer = 0, gameoverTimer = 0;
     bool newHigh = false;
-    float gameT = 0, spawnCD = 0, eventCD = 0, timeScale = 1;
 
     std::vector<Enemy> enemies, pending;
     std::vector<Bullet> bullets;
     std::vector<Particle> parts;
     size_t partCursor = 0;
     std::vector<Floater> floaters;
-    std::string banner;
-    float bannerT = 0;
-    Col bannerC;
-    float shake = 0, flash = 0, bombRingT = -1;
-    V2 bombRingP;
-    float attractT = 0;
+    std::vector<Banner> banners;
+    std::vector<Wave> waves;
 
     // input
-    V2 inMove, inAim, mouseGame;
-    bool inFire = false, usingMouse = false, trigHeld[2] = {};
-    float shotTimer = 0;
+    V2 inMove, inAim;
+    bool trigHeld = false;
 
     // ------------------------------------------------ setup
     bool init() {
@@ -403,7 +429,7 @@ struct Game {
             SDL_Log("SDL_Init failed: %s", SDL_GetError());
             return false;
         }
-        if (!SDL_CreateWindowAndRenderer("PRISM", W, H, SDL_WINDOW_RESIZABLE, &win, &ren)) {
+        if (!SDL_CreateWindowAndRenderer("Prism Arena", W, H, SDL_WINDOW_RESIZABLE, &win, &ren)) {
             SDL_Log("window failed: %s", SDL_GetError());
             return false;
         }
@@ -412,15 +438,17 @@ struct Game {
         if (opt.fullscreen) SDL_SetWindowFullscreen(win, true);
 
         scene = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, W, H);
+        frame = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, W, H);
         for (int i = 0; i < 4; ++i) {
             bloom[i] = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, W >> (i + 1), H >> (i + 1));
             SDL_SetTextureScaleMode(bloom[i], SDL_SCALEMODE_LINEAR);
         }
-        SDL_SetTextureScaleMode(scene, SDL_SCALEMODE_LINEAR);
-        if (!scene || !bloom[3]) {
+        if (!scene || !frame || !bloom[3]) {
             SDL_Log("render targets unsupported: %s", SDL_GetError());
             return false;
         }
+        SDL_SetTextureScaleMode(scene, SDL_SCALEMODE_LINEAR);
+        SDL_SetTextureScaleMode(frame, SDL_SCALEMODE_LINEAR);
         dr.init(ren);
         grid.init();
         audio.init();
@@ -431,6 +459,7 @@ struct Game {
             SDL_free(p);
         }
         loadHigh();
+        reset();
         return true;
     }
     void shutdown() {
@@ -460,624 +489,611 @@ struct Game {
         if (pad && opt.rumble && !testMode())
             SDL_RumbleGamepad(pad, Uint16(clamp01(lo) * 65535), Uint16(clamp01(hi) * 65535), Uint32(ms));
     }
-    float pan(float x) const { return (x - W / 2.f) / (W / 2.f) * 0.6f; }
-
-    // ------------------------------------------------ particles & fx
-    void emit(V2 p, V2 v, Col c, float life, float w = 2.f) {
-        Particle np{p, v, c, life, life, w};
-        const size_t CAP = 7000;
-        if (parts.size() < CAP) parts.push_back(np);
-        else parts[partCursor++ % CAP] = np;
+    // play a sound at most `limit` times per simulation step, panned by x
+    void sfx(Sfx s, int limit, float x = W / 2.f) {
+        if (sfxUsed[(int)s] >= limit) return;
+        ++sfxUsed[(int)s];
+        audio.play(s, 1.f, (x - W / 2.f) / (W / 2.f) * 0.6f);
     }
-    void burst(V2 p, Col c, int n, float smin, float smax, float lmin = 0.45f, float lmax = 1.2f, float w = 2.f) {
+
+    // ------------------------------------------------ particles
+    // n particles from p; angle < -100 means all directions, otherwise a cone of `spread`
+    void emit(V2 p, int n, Col c, float s0 = 80, float s1 = 480, float l0 = 0.5f, float l1 = 1.3f,
+              float angle = -1000, float spread = TAU, float var = 45) {
+        const size_t CAP = 4000;
+        float vr = var / 255.f;
         for (int i = 0; i < n; ++i) {
-            float s = frand(smin, smax) * (frand(0, 1) < 0.15f ? 1.7f : 1.f);
-            Col cc = mix(c, WHITE, frand(0, 0.45f));
-            emit(p, fromAng(frand(0, TAU)) * s, cc, frand(lmin, lmax), w * frand(0.7f, 1.2f));
+            float a = angle < -100 ? frand(0, TAU) : angle + (frand(0, 1) - 0.5f) * spread;
+            float lf = frand(l0, l1);
+            Col cc{clamp01(c.r + frand(-vr, vr)), clamp01(c.g + frand(-vr, vr)), clamp01(c.b + frand(-vr, vr)), 1};
+            Particle np{p, fromAng(a) * frand(s0, s1), cc, lf, lf};
+            if (parts.size() < CAP) parts.push_back(np);
+            else parts[partCursor++ % CAP] = np;
         }
     }
-    void setBanner(const std::string& s, Col c) {
-        banner = s;
-        bannerT = 2.2f;
-        bannerC = c;
-    }
-
-    // ------------------------------------------------ game flow
-    void startGame() {
-        mode = Mode::Play;
-        modeT = 0;
-        enemies.clear();
-        pending.clear();
-        bullets.clear();
-        floaters.clear();
-        pp = {W / 2.f, H / 2.f};
-        pv = {};
-        pang = -PI / 2;
-        alive = true;
-        invT = 2.f;
-        lives = 3;
-        bombs = 3;
-        streak = 0;
-        mult = 1;
-        score = 0;
-        newHigh = false;
-        nextLife = 100000;
-        nextBomb = 75000;
-        gameT = 0;
-        spawnCD = 1.2f;
-        eventCD = 14.f;
-        timeScale = 1;
-        grid.impulse(pp, 900, 400);
-        audio.setMusicLevel(1.f);
-        audio.play(Sfx::ExtraLife, 0.6f);
-        SDL_HideCursor();
-    }
-    void toTitle() {
-        if (score > hiscore) hiscore = score;
-        saveHigh();
-        mode = Mode::Title;
-        modeT = 0;
-        enemies.clear();
-        bullets.clear();
-        audio.setMusicLevel(0.4f);
-        SDL_ShowCursor();
-    }
-    void gameOver() {
-        mode = Mode::GameOver;
-        modeT = 0;
-        if (score > hiscore) {
-            hiscore = score;
-            newHigh = true;
-        }
-        saveHigh();
-        audio.setMusicLevel(0.25f);
-        SDL_ShowCursor();
-    }
-
-    void addScore(long long pts) {
-        score += pts * mult;
-        while (score >= nextLife) {
-            nextLife *= 2;
-            ++lives;
-            setBanner("EXTRA LIFE", {0.4f, 1, 0.5f});
-            audio.play(Sfx::ExtraLife);
-            rumble(0.2f, 0.4f, 200);
-        }
-        while (score >= nextBomb) {
-            nextBomb += 150000;
-            ++bombs;
-            setBanner("EXTRA BOMB", {1, 0.8f, 0.3f});
-            audio.play(Sfx::ExtraLife, 0.8f, 0, 1.25f);
-        }
-    }
-    int multForStreak(int s) const {
-        static const int th[] = {0, 20, 50, 100, 170, 260, 380, 530, 720, 1000};
-        int m = 1;
-        for (int i = 0; i < 10; ++i)
-            if (s >= th[i]) m = i + 1;
-        return m;
-    }
-
-    Enemy makeEnemy(EType t, V2 p) {
-        Enemy e;
-        e.type = t;
-        e.p = p;
-        e.r = DEFS[t].r;
-        e.hp = DEFS[t].hp;
-        e.ang = frand(0, TAU);
-        e.spin = frand(1.5f, 3.f) * (irand(0, 1) ? 1 : -1);
-        e.side = irand(0, 1) ? 1.f : -1.f;
-        e.dir = fromAng(frand(0, TAU));
-        if (t == LANCER) e.timer = frand(1.3f, 1.9f);
-        return e;
-    }
-    void spawn(EType t, V2 p, bool quiet = false) {
-        p.x = std::clamp(p.x, AX0 + 30, AX1 - 30);
-        p.y = std::clamp(p.y, AY0 + 30, AY1 - 30);
-        pending.push_back(makeEnemy(t, p));
-        if (!quiet) audio.play(Sfx::Spawn, 0.7f, pan(p.x), frand(0.9f, 1.15f));
-    }
-    V2 safeSpot(float minDist = 280) {
-        V2 p;
-        for (int i = 0; i < 30; ++i) {
-            p = {frand(AX0 + 40, AX1 - 40), frand(AY0 + 40, AY1 - 40)};
-            if (len(p - pp) > minDist) break;
-        }
-        return p;
-    }
-    int countType(EType t) const {
-        int n = 0;
-        for (auto& e : enemies) n += (!e.dead && e.type == t);
-        for (auto& e : pending) n += (e.type == t);
-        return n;
-    }
-
-    void killEnemy(Enemy& e, bool scored) {
-        if (e.dead) return;
-        e.dead = true;
-        const EnemyDef& d = DEFS[e.type];
-        bool big = e.type == SINGULARITY;
-        burst(e.p, d.col, big ? 220 : 42, 80, big ? 700 : 480, 0.5f, big ? 1.8f : 1.1f);
-        grid.impulse(e.p, big ? 1800 : 380, big ? 420 : 130);
-        audio.play(big ? Sfx::BigExplode : Sfx::Explode, big ? 1.f : 0.55f, pan(e.p.x), frand(0.85f, 1.2f));
-        if (big) {
-            shake = std::max(shake, 10.f);
-            rumble(0.5f, 0.6f, 300);
-        }
-        if (!scored) return;
-        ++streak;
-        int m = multForStreak(streak);
-        if (m > mult) {
-            mult = m;
-            setBanner("MULTIPLIER X" + std::to_string(mult), {0.4f, 0.9f, 1});
-            audio.play(Sfx::MultUp);
-        }
-        addScore(d.score);
-        if (big) floaters.push_back({e.p, "+" + commas((long long)d.score * mult), 1.4f, d.col});
-        rumble(0.05f, 0.12f, 40);
-        if (e.type == SPLITTER) {
-            float a0 = frand(0, TAU);
-            for (int i = 0; i < 3; ++i) {
-                V2 dir = fromAng(a0 + TAU * i / 3);
-                Enemy s = makeEnemy(SHARD, e.p + dir * 14);
-                s.spawnT = 0;
-                s.v = dir * 260;
-                s.side = (i % 2) ? 1.f : -1.f;
-                pending.push_back(s);
-            }
-        }
-    }
-    void burstSingularity(Enemy& s) {
-        s.dead = true;
-        burst(s.p, DEFS[SINGULARITY].col, 260, 100, 800, 0.6f, 1.8f);
-        grid.impulse(s.p, 2200, 500);
-        audio.play(Sfx::BigExplode, 1.f, pan(s.p.x));
-        shake = std::max(shake, 12.f);
-        for (int i = 0; i < 8; ++i) {
-            Enemy k = makeEnemy(SEEKER, s.p + fromAng(TAU * i / 8) * 20);
-            k.spawnT = 0;
-            k.v = fromAng(TAU * i / 8) * 420;
-            pending.push_back(k);
-        }
-    }
-    void playerDie() {
-        alive = false;
-        deadT = 2.4f;
-        timeScale = 0.25f;
-        --lives;
-        for (int i = 0; i < 5; ++i) burst(pp, hsv(i / 5.f, 0.6f, 1), 120, 100, 900, 0.8f, 2.2f, 2.5f);
-        burst(pp, WHITE, 150, 50, 400, 0.5f, 1.4f, 3.f);
-        grid.impulse(pp, 2600, 750);
-        shake = 20;
-        flash = 0.7f;
-        audio.play(Sfx::Death, 1.f, pan(pp.x));
-        rumble(1, 1, 700);
-        for (auto& e : enemies) killEnemy(e, false);
-        pending.clear();
-        bullets.clear();
-        streak = 0;
-        mult = 1;
-    }
-    void useBomb() {
-        if (mode != Mode::Play || !alive || bombs <= 0) return;
-        --bombs;
-        for (auto& e : enemies) killEnemy(e, false);
-        pending.clear();
-        grid.impulse(pp, 3000, 1400);
-        burst(pp, {0.6f, 0.9f, 1}, 300, 300, 1400, 0.6f, 1.6f, 2.5f);
-        bombRingT = 0;
-        bombRingP = pp;
-        shake = 14;
-        flash = 0.5f;
-        audio.play(Sfx::Bomb, 1.f);
-        rumble(0.9f, 0.7f, 600);
-        spawnCD = std::max(spawnCD, 1.f);
-    }
-
-    // ------------------------------------------------ director
-    void spawnRandom() {
-        float w[NUM_TYPES] = {};
-        w[DRIFTER] = 10;
-        if (gameT > 8) w[SEEKER] = 8;
-        if (gameT > 25) w[WEAVER] = 6;
-        if (gameT > 40) w[SPLITTER] = 5;
-        if (gameT > 60) w[LANCER] = 4;
-        int singCap = std::min(3, 1 + int(gameT / 150));
-        if (gameT > 80 && countType(SINGULARITY) < singCap) w[SINGULARITY] = 1.2f;
-        float total = 0;
-        for (float x : w) total += x;
-        float r = frand(0, total);
-        int t = 0;
-        for (; t < NUM_TYPES - 1; ++t) {
-            if (r < w[t]) break;
-            r -= w[t];
-        }
-        if (w[t] <= 0) t = DRIFTER;
-        spawn(EType(t), safeSpot(t == SINGULARITY ? 350 : 280));
-    }
-    void spawnEvent() {
-        std::vector<int> opts = {0, 1};
-        if (gameT > 40) opts.push_back(3);
-        if (gameT > 50) opts.push_back(2);
-        int ev = opts[irand(0, int(opts.size()) - 1)];
-        if (ev == 0) {  // corner swarm
-            int k = std::min(8, 3 + int(gameT / 40));
-            V2 corners[4] = {{AX0 + 60, AY0 + 60}, {AX1 - 60, AY0 + 60}, {AX0 + 60, AY1 - 60}, {AX1 - 60, AY1 - 60}};
-            for (V2 c : corners) {
-                if (len(c - pp) < 220) continue;
-                for (int i = 0; i < k; ++i) spawn(SEEKER, c + V2{frand(-40, 40), frand(-40, 40)}, i > 0);
-            }
-        } else if (ev == 1) {  // ring around the player
-            int n = std::min(28, 12 + int(gameT / 20));
-            EType t = (gameT > 60 && irand(0, 1)) ? WEAVER : DRIFTER;
-            float a0 = frand(0, TAU);
-            for (int i = 0; i < n; ++i) spawn(t, pp + fromAng(a0 + TAU * i / n) * 300, i > 0);
-        } else if (ev == 2) {  // lancer line
-            int n = irand(6, 10);
-            int edge = irand(0, 3);
-            for (int i = 0; i < n; ++i) {
-                float f = (i + 0.5f) / n;
-                V2 p = edge == 0 ? V2{AX0 + 40, AY0 + f * (AY1 - AY0)}
-                     : edge == 1 ? V2{AX1 - 40, AY0 + f * (AY1 - AY0)}
-                     : edge == 2 ? V2{AX0 + f * (AX1 - AX0), AY0 + 40}
-                                 : V2{AX0 + f * (AX1 - AX0), AY1 - 40};
-                if (len(p - pp) > 160) spawn(LANCER, p, i > 0);
-            }
-        } else {  // splitter pack
-            int n = irand(4, 6);
-            for (int i = 0; i < n; ++i) spawn(SPLITTER, safeSpot(320), i > 0);
-        }
-    }
-    void director(float dt) {
-        if (enemies.size() > 240) return;
-        spawnCD -= dt;
-        if (spawnCD <= 0) {
-            int n = std::min(7, 1 + int(gameT / 30));
-            for (int i = 0; i < n; ++i) spawnRandom();
-            spawnCD = std::max(0.3f, 1.25f - gameT * 0.006f) * frand(0.7f, 1.3f);
-        }
-        eventCD -= dt;
-        if (eventCD <= 0 && gameT > 10) {
-            spawnEvent();
-            eventCD = frand(14, 22) - std::min(6.f, gameT / 60);
-        }
-    }
-
-    // ------------------------------------------------ simulation
-    void fire() {
-        V2 d = norm(inAim);
-        float a = angOf(d);
-        int level = mult >= 6 ? 2 : mult >= 3 ? 1 : 0;
-        auto shot = [&](float da, float offs) {
-            V2 dir = fromAng(a + da + frand(-0.015f, 0.015f));
-            bullets.push_back({pp + dir * 14 + perp(dir) * offs, dir * 1150});
-        };
-        if (level == 0) {
-            shot(0, -5);
-            shot(0, 5);
-        } else if (level == 1) {
-            shot(-0.09f, 0);
-            shot(0, 0);
-            shot(0.09f, 0);
-        } else {
-            shot(0, -5);
-            shot(0, 5);
-            shot(-0.14f, 0);
-            shot(0.14f, 0);
-        }
-        audio.play(Sfx::Shoot, 0.45f, pan(pp.x), frand(0.94f, 1.06f));
-    }
-
-    void updatePlayer(float dt) {
-        if (!alive) {
-            deadT -= dt;
-            if (deadT <= 0) {
-                if (lives <= 0) {
-                    gameOver();
-                } else {
-                    alive = true;
-                    pp = {W / 2.f, H / 2.f};
-                    pv = {};
-                    invT = 2.5f;
-                    spawnCD = 1.5f;
-                    grid.impulse(pp, -900, 300);
-                    audio.play(Sfx::ExtraLife, 0.5f, 0, 0.8f);
-                }
-            }
-            return;
-        }
-        V2 target = inMove * 430;
-        pv += (target - pv) * (1 - std::exp(-dt * 14));
-        pp += pv * dt;
-        pp.x = std::clamp(pp.x, AX0 + 12, AX1 - 12);
-        pp.y = std::clamp(pp.y, AY0 + 12, AY1 - 12);
-        if (len(inMove) > 0.1f) {
-            pang = turnToward(pang, angOf(inMove), dt * 18);
-            if (frand(0, 1) < 0.7f) {
-                V2 back = fromAng(pang + PI + frand(-0.35f, 0.35f));
-                emit(pp + back * 9, back * frand(120, 280) + pv * 0.3f, mix({1, 0.5f, 0.1f}, {1, 0.9f, 0.4f}, frand(0, 1)),
-                     frand(0.2f, 0.4f), 1.6f);
-            }
-        }
-        invT -= dt;
-        fireT -= dt;
-        if (inFire && len(inAim) > 0.01f && fireT <= 0) {
-            fire();
-            fireT += mult >= 6 ? 0.07f : 0.082f;
-            if (fireT < 0) fireT = 0;
-        }
-        if (fireT < 0) fireT = 0;
-    }
-
-    void updateBullets(float dt) {
-        for (auto& b : bullets) {
-            b.p += b.v * dt;
-            if (b.p.x < AX0 || b.p.x > AX1 || b.p.y < AY0 || b.p.y > AY1) {
-                b.dead = true;
-                b.p.x = std::clamp(b.p.x, AX0, AX1);
-                b.p.y = std::clamp(b.p.y, AY0, AY1);
-                for (int i = 0; i < 5; ++i)
-                    emit(b.p, rot(-norm(b.v), frand(-1.2f, 1.2f)) * frand(80, 260), {1, 0.85f, 0.5f}, frand(0.15f, 0.35f), 1.4f);
-                grid.impulse(b.p, 90, 60);
-            }
-        }
-    }
-
-    void bounce(Enemy& e) {
-        float r = e.r;
-        if (e.p.x < AX0 + r) { e.p.x = AX0 + r; e.v.x = std::fabs(e.v.x); e.dir.x = std::fabs(e.dir.x); }
-        if (e.p.x > AX1 - r) { e.p.x = AX1 - r; e.v.x = -std::fabs(e.v.x); e.dir.x = -std::fabs(e.dir.x); }
-        if (e.p.y < AY0 + r) { e.p.y = AY0 + r; e.v.y = std::fabs(e.v.y); e.dir.y = std::fabs(e.dir.y); }
-        if (e.p.y > AY1 - r) { e.p.y = AY1 - r; e.v.y = -std::fabs(e.v.y); e.dir.y = -std::fabs(e.dir.y); }
-    }
-    void steer(Enemy& e, V2 desired, float rate, float dt) { e.v += (desired - e.v) * clamp01(rate * dt); }
-
-    void updateEnemies(float dt) {
-        V2 target = alive ? pp : V2{W / 2.f, H / 2.f};
-        for (auto& e : enemies) {
-            if (e.dead) continue;
-            e.hitFlash -= dt;
-            e.t += dt;
-            if (e.spawnT > 0) {
-                e.spawnT -= dt;
-                continue;
-            }
-            V2 to = target - e.p;
-            float dist = len(to);
-            V2 toN = dist > 0.01f ? to / dist : V2{1, 0};
-            switch (e.type) {
-                case DRIFTER: {
-                    e.dir = rot(e.dir, frand(-2.f, 2.f) * dt);
-                    steer(e, norm(e.dir * 0.75f + toN * 0.35f) * 115, 2, dt);
-                    e.ang += e.spin * dt;
-                } break;
-                case SEEKER: {
-                    steer(e, toN * 265, 2.6f, dt);
-                    e.ang = angOf(e.v);
-                } break;
-                case WEAVER: {
-                    V2 dodge;
-                    for (auto& b : bullets) {
-                        V2 rel = e.p - b.p;
-                        if (len2(rel) > 170 * 170) continue;
-                        V2 bd = norm(b.v);
-                        float along = dot(rel, bd);
-                        if (along <= 0) continue;
-                        V2 lat = rel - bd * along;
-                        float ld = len(lat);
-                        if (ld < 48) dodge += (ld > 0.5f ? lat / ld : perp(bd)) * (1 - ld / 48);
-                    }
-                    V2 des = toN * 210 + dodge * 900;
-                    if (len(des) > 380) des = norm(des) * 380;
-                    steer(e, des, 7, dt);
-                    e.ang += e.spin * 0.6f * dt;
-                } break;
-                case SPLITTER: {
-                    steer(e, toN * 125, 1.5f, dt);
-                    e.ang += e.spin * 0.8f * dt;
-                } break;
-                case SHARD: {
-                    float off = e.side * 1.15f * clamp01(dist / 450);
-                    steer(e, rot(toN, off) * 300, 3.2f, dt);
-                    e.ang = angOf(e.v);
-                } break;
-                case LANCER: {
-                    if (e.state == 0) {
-                        e.timer -= dt;
-                        if (e.timer > 0.55f) e.ang = turnToward(e.ang, angOf(to), dt * 2.8f);
-                        e.v *= std::exp(-dt * 4);
-                        if (!e.charged && e.timer < 0.7f) {
-                            e.charged = true;
-                            audio.play(Sfx::Charge, 0.8f, pan(e.p.x));
-                        }
-                        if (e.timer <= 0) {
-                            e.state = 1;
-                            e.v = fromAng(e.ang) * 950;
-                        }
-                    } else {
-                        V2 np = e.p + e.v * dt;
-                        if (np.x < AX0 + e.r || np.x > AX1 - e.r || np.y < AY0 + e.r || np.y > AY1 - e.r) {
-                            e.state = 0;
-                            e.timer = frand(1.1f, 1.7f);
-                            e.charged = false;
-                            bounce(e);
-                            for (int i = 0; i < 14; ++i)
-                                emit(e.p, rot(-norm(e.v), frand(-1.3f, 1.3f)) * frand(100, 400), DEFS[LANCER].col, frand(0.2f, 0.5f));
-                            grid.impulse(e.p, 500, 140);
-                            e.v = {};
-                        }
-                    }
-                } break;
-                case SINGULARITY: {
-                    e.v *= std::exp(-dt * 1.5f);
-                    e.r = DEFS[SINGULARITY].r + e.fed * 1.6f;
-                    grid.pull(e.p, 1700 + e.fed * 120, SING_RANGE, dt);
-                    if (frand(0, 1) < 0.6f) {
-                        float a = frand(0, TAU), rr = frand(90, 220);
-                        emit(e.p + fromAng(a) * rr, perp(fromAng(a)) * 90, mix(DEFS[SINGULARITY].col, {0.4f, 0.8f, 1}, frand(0, 1)),
-                             frand(0.6f, 1.1f), 1.5f);
-                    }
-                    // pull other things in
-                    for (auto& o : enemies) {
-                        if (&o == &e || !o.active() || o.type == SINGULARITY) continue;
-                        V2 r = e.p - o.p;
-                        float d = len(r);
-                        if (d > SING_RANGE) continue;
-                        if (d < e.r) {
-                            o.dead = true;
-                            ++e.fed;
-                            burst(o.p, DEFS[o.type].col, 12, 40, 160, 0.2f, 0.5f);
-                            audio.play(Sfx::Absorb, 0.7f, pan(e.p.x));
-                            continue;
-                        }
-                        o.v += r / d * (520 * (1 - d / SING_RANGE) * dt);
-                    }
-                    for (auto& b : bullets) {
-                        V2 r = e.p - b.p;
-                        float d = len(r);
-                        if (d < SING_RANGE && d > 1) b.v += r / d * (2400 * (1 - d / SING_RANGE) * dt);
-                    }
-                    if (alive) {
-                        V2 r = e.p - pp;
-                        float d = len(r);
-                        if (d < SING_RANGE && d > 1) pp += r / d * (150 * (1 - d / SING_RANGE) * dt);
-                    }
-                    if (e.fed >= 10) burstSingularity(e);
-                } break;
-                default: break;
-            }
-            e.p += e.v * dt;
-            if (e.type != LANCER || e.state == 0) bounce(e);
-        }
-        // soft separation so packs don't collapse into one shape
-        for (size_t i = 0; i < enemies.size(); ++i) {
-            Enemy& a = enemies[i];
-            if (!a.active() || a.type == SINGULARITY) continue;
-            for (size_t j = i + 1; j < enemies.size(); ++j) {
-                Enemy& b = enemies[j];
-                if (!b.active() || b.type == SINGULARITY) continue;
-                V2 d = a.p - b.p;
-                float rr = (a.r + b.r) * 0.8f, l2 = len2(d);
-                if (l2 >= rr * rr || l2 < 1e-4f) continue;
-                float l = std::sqrt(l2);
-                V2 push = d / l * ((rr - l) * 0.5f);
-                a.p += push;
-                b.p -= push;
-            }
-        }
-    }
-
-    void collisions() {
-        for (auto& b : bullets) {
-            if (b.dead) continue;
-            for (auto& e : enemies) {
-                if (!e.active()) continue;
-                float rr = e.r + 4;
-                if (len2(e.p - b.p) > rr * rr) continue;
-                b.dead = true;
-                if (--e.hp <= 0) {
-                    killEnemy(e, true);
-                } else {
-                    e.hitFlash = 0.07f;
-                    burst(b.p, DEFS[e.type].col, 6, 60, 220, 0.15f, 0.35f);
-                    audio.play(Sfx::Hit, 0.5f, pan(e.p.x), frand(0.9f, 1.2f));
-                    if (e.type == SINGULARITY) {
-                        grid.impulse(e.p, 300, 160);
-                        e.v += norm(b.v) * 18;
-                    }
-                }
-                break;
-            }
-        }
-        if (alive && invT <= 0) {
-            for (auto& e : enemies) {
-                if (!e.active()) continue;
-                float rr = e.r * 0.75f + 9;
-                if (len2(e.p - pp) < rr * rr) {
-                    playerDie();
-                    break;
-                }
-            }
-        }
-    }
-
-    void updateParticles(float dt) {
-        float drag = std::exp(-dt * 2.6f);
+    void updateParticles(float dt, const std::vector<V2>& attractors) {
+        float drag = std::exp(-2.4f * dt);
         for (size_t i = 0; i < parts.size();) {
             Particle& p = parts[i];
+            p.v *= drag;
+            for (V2 a : attractors) {
+                V2 d = a - p.p;
+                if (len2(d) < 260 * 260) {
+                    float dist = len(d) + 8;
+                    p.v += d / dist * (900 / dist * dt * 60);
+                }
+            }
+            p.p += p.v * dt;
+            if (p.p.x < AX0) { p.p.x = AX0; p.v.x *= -0.5f; }
+            if (p.p.x > AX1) { p.p.x = AX1; p.v.x *= -0.5f; }
+            if (p.p.y < AY0) { p.p.y = AY0; p.v.y *= -0.5f; }
+            if (p.p.y > AY1) { p.p.y = AY1; p.v.y *= -0.5f; }
             p.life -= dt;
             if (p.life <= 0) {
                 parts[i] = parts.back();
                 parts.pop_back();
                 continue;
             }
-            for (auto& e : enemies) {
-                if (e.type != SINGULARITY || !e.active()) continue;
-                V2 r = e.p - p.p;
-                float d2 = len2(r);
-                if (d2 < SING_RANGE * SING_RANGE && d2 > 1) {
-                    float d = std::sqrt(d2);
-                    p.v += r / d * (1600 * (1 - d / SING_RANGE) * dt);
-                    if (d < 10) p.life = 0;
-                }
-            }
-            p.v *= drag;
-            p.p += p.v * dt;
-            if (p.p.x < AX0) { p.p.x = AX0; p.v.x = std::fabs(p.v.x) * 0.6f; }
-            if (p.p.x > AX1) { p.p.x = AX1; p.v.x = -std::fabs(p.v.x) * 0.6f; }
-            if (p.p.y < AY0) { p.p.y = AY0; p.v.y = std::fabs(p.v.y) * 0.6f; }
-            if (p.p.y > AY1) { p.p.y = AY1; p.v.y = -std::fabs(p.v.y) * 0.6f; }
             ++i;
         }
     }
 
-    void step(float dt) {
-        modeT += dt;
-        clock += dt;
-        shake *= std::exp(-dt * 6);
-        flash = std::max(0.f, flash - dt * 1.6f);
-        bannerT -= dt;
-        if (bombRingT >= 0) {
-            bombRingT += dt;
-            if (bombRingT > 0.7f) bombRingT = -1;
-        }
-        if (mode == Mode::Paused) return;
+    // ------------------------------------------------ game flow
+    void reset() {
+        pp = {W / 2.f, H / 2.f};
+        pv = {};
+        pang = -PI / 2;
+        alive = true;
+        invuln = 2;
+        cooldown = 0;
+        respawn = 0;
+        bullets.clear();
+        enemies.clear();
+        pending.clear();
+        floaters.clear();
+        banners.clear();
+        waves.clear();
+        score = 0;
+        lives = 3;
+        bombs = 3;
+        streak = 0;
+        gameT = 0;
+        spawnTimer = 1.5f;
+        eventTimer = 18;
+        nextLife = 75000;
+        nextBomb = 100000;
+        weapon = 0;
+        gameoverTimer = 0;
+        newHigh = false;
+        parts.clear();
+    }
+    void startGame() {
+        reset();
+        mode = Mode::Play;
+        grid.impulse({W / 2.f, H / 2.f}, 1500, 600);
+        sfx(Sfx::Bomb, 1);
+        rumble(0.3f, 0.5f, 200);
+        audio.setMusicLevel(1.f);
+    }
+    void toTitle() {
+        mode = Mode::Title;
+        enemies.clear();
+        pending.clear();
+        bullets.clear();
+        waves.clear();
+        audio.setMusicLevel(0.4f);
+    }
+    void confirm() {
+        if (mode == Mode::Title) startGame();
+        else if (mode == Mode::Paused) mode = Mode::Play;
+        else if (mode == Mode::GameOver && gameoverTimer <= -1) toTitle();
+    }
 
-        timeScale = std::min(1.f, timeScale + dt * 0.6f);
-        float sdt = dt * timeScale;
-        grid.update(sdt);
-        updateParticles(sdt);
-        for (auto& f : floaters) {
-            f.t -= dt;
-            f.p.y -= 30 * dt;
+    // ------------------------------------------------ scoring
+    int multiplier() const {
+        int m = 1;
+        for (int s : MULT_STEPS) m += streak >= s;
+        return m;
+    }
+    void banner(const std::string& s, Col c) { banners.push_back({s, c, 2.f}); }
+    void addScore(long long pts) {
+        score += pts;
+        while (score >= nextLife) {
+            nextLife += 75000;
+            ++lives;
+            banner("EXTRA LIFE", rgb(120, 255, 160));
+            sfx(Sfx::Bonus, 1);
         }
-        floaters.erase(std::remove_if(floaters.begin(), floaters.end(), [](const Floater& f) { return f.t <= 0; }),
-                       floaters.end());
+        while (score >= nextBomb) {
+            nextBomb += 100000;
+            ++bombs;
+            banner("+1 BOMB", rgb(255, 200, 90));
+            sfx(Sfx::Bonus, 1);
+        }
+        while (weapon < 3 && score >= WEAPON_STEPS[weapon]) {
+            ++weapon;
+            banner("WEAPON UPGRADE", rgb(120, 220, 255));
+            sfx(Sfx::Bonus, 1);
+        }
+    }
 
-        if (mode != Mode::Play) {  // title / game over: ambient fireworks
-            attractT -= dt;
-            if (attractT <= 0) {
-                attractT = frand(0.35f, 0.9f);
-                V2 p{frand(AX0 + 80, AX1 - 80), frand(AY0 + 80, AY1 - 80)};
-                burst(p, hsv(frand(0, 1), 0.7f, 1), 50, 60, 380, 0.5f, 1.2f);
-                grid.impulse(p, 500, 180);
+    // ------------------------------------------------ events of the world
+    Enemy makeEnemy(EType t, V2 p) {
+        const EnemyDef& d = DEFS[t];
+        Enemy e;
+        e.type = t;
+        e.p = p;
+        e.ang = frand(0, TAU);
+        e.spawn = d.spawnTime;
+        e.hp = d.hp;
+        e.t = frand(0, 10);
+        e.speed = 1 + std::min(0.6f, gameT / 300);
+        switch (t) {
+            case DRIFTER:
+                e.v = fromAng(frand(0, TAU)) * (frand(70, 110) * e.speed);
+                e.spin = (irand(0, 1) ? 1 : -1) * frand(1, 2);
+                break;
+            case SHARD: e.dir = irand(0, 1) ? 1 : -1; break;
+            case LANCER: e.timer = frand(1, 2.5f); break;
+            case SINGULARITY: e.v = fromAng(frand(0, TAU)) * 25; break;
+            default: break;
+        }
+        if (e.spawn > 0) sfx(Sfx::Spawn, 1, p.x);
+        return e;
+    }
+    void spawn(EType t, V2 p) {
+        if (enemies.size() + pending.size() < 200) pending.push_back(makeEnemy(t, p));
+    }
+    void killEnemy(Enemy& e, bool scored = true, bool chain = true) {
+        if (e.dead) return;
+        e.dead = true;
+        const EnemyDef& d = DEFS[e.type];
+        if (scored) {
+            int prev = multiplier();
+            ++streak;
+            long long pts = (long long)d.score * multiplier();
+            addScore(pts);
+            if (floaters.size() < 40) floaters.push_back({e.p, std::to_string(pts), d.col, 0.8f});
+            if (multiplier() > prev) banner("MULTIPLIER X" + std::to_string(multiplier()), WHITE);
+        }
+        int n = d.r > 12 ? 70 : 35;
+        emit(e.p, n, d.col);
+        emit(e.p, n / 4, WHITE, 40, 200, 0.2f, 0.5f);
+        grid.impulse(e.p, 380, 110);
+        sfx(Sfx::Explode, 3, e.p.x);
+        shake = std::max(shake, 2.5f);
+        if (!chain) return;
+        if (e.type == SPLITTER) {
+            for (int i = 0; i < 3; ++i) {
+                Enemy s = makeEnemy(SHARD, e.p);
+                s.v = fromAng(deg(i * 120 + frand(0, 120))) * 320;
+                pending.push_back(s);
             }
-            return;
+        } else if (e.type == SINGULARITY) {
+            bigExplosion(e.p, d.col, 260, 1100);
+        }
+    }
+    void bigExplosion(V2 p, Col c, float radius, float strength) {
+        emit(p, 350, c, 100, 900, 0.7f, 2.0f);
+        emit(p, 150, WHITE, 50, 500, 0.4f, 1.2f);
+        grid.impulse(p, strength, radius);
+        shake = std::max(shake, 12.f);
+        sfx(Sfx::BigExplode, 1, p.x);
+        rumble(0.7f, 0.9f, 350);
+    }
+    // an ignored singularity collapses into a ring of shards
+    void burstSingularity(Enemy& s) {
+        if (s.dead) return;
+        killEnemy(s, false, false);
+        bigExplosion(s.p, DEFS[SINGULARITY].col, 220, 900);
+        for (int i = 0; i < 8; ++i) {
+            Enemy sh = makeEnemy(SHARD, s.p);
+            sh.v = fromAng(deg(i * 45.f)) * 380;
+            pending.push_back(sh);
+        }
+    }
+    void hitEnemy(Enemy& e, const Bullet& b) {
+        if (e.type == SINGULARITY) e.v += norm(b.v) * 6;
+        e.flash = 0.06f;
+        if (--e.hp <= 0) {
+            killEnemy(e);
+        } else {
+            emit(b.p, 6, DEFS[e.type].col, 60, 220, 0.2f, 0.5f);
+            sfx(Sfx::Ping, 2, e.p.x);
+        }
+    }
+    void playerDie() {
+        alive = false;
+        respawn = 2.4f;
+        emit(pp, 500, WHITE, 100, 1200, 0.8f, 2.4f);
+        emit(pp, 300, rgb(255, 140, 40), 50, 700, 0.6f, 1.8f);
+        grid.impulse(pp, 1800, 480);
+        shake = 22;
+        rumble(1, 1, 800);
+        sfx(Sfx::Death, 1, pp.x);
+        for (auto& e : enemies) killEnemy(e, false, false);
+        for (auto& e : pending) killEnemy(e, false, false);
+        bullets.clear();
+        streak = 0;
+        if (--lives <= 0) gameoverTimer = 2.5f;
+    }
+    void useBomb() {
+        if (bombs <= 0 || !alive || mode != Mode::Play) return;
+        --bombs;
+        waves.push_back({pp, 0});
+        grid.impulse(pp, 2600, 900);
+        emit(pp, 400, WHITE, 600, 1400, 0.5f, 1.2f);
+        shake = 16;
+        rumble(0.8f, 1, 600);
+        sfx(Sfx::Bomb, 1);
+        invuln = std::max(invuln, 1.f);
+        spawnTimer = std::max(spawnTimer, 1.5f);
+    }
+
+    // ------------------------------------------------ spawning
+    V2 spawnPoint(float minDist = 260) {
+        for (int i = 0; i < 30; ++i) {
+            V2 p{frand(AX0 + 40, AX1 - 40), frand(AY0 + 40, AY1 - 40)};
+            if (len(p - pp) > minDist) return p;
+        }
+        return pp.x > W / 2.f ? V2{AX0 + 40, AY0 + 40} : V2{AX1 - 40, AY1 - 40};
+    }
+    int countType(EType t) const {
+        int n = 0;
+        for (auto& e : enemies) n += (!e.dead && e.type == t);
+        for (auto& e : pending) n += (!e.dead && e.type == t);
+        return n;
+    }
+    void updateSpawner(float dt) {
+        if (!waves.empty() || !alive) return;
+        float t = gameT;
+        spawnTimer -= dt;
+        if (spawnTimer <= 0) {
+            spawnTimer = std::max(0.3f, 1.5f - t * 0.0075f) * frand(0.7f, 1.3f);
+            float w[NUM_TYPES] = {};
+            w[DRIFTER] = 4;
+            w[SEEKER] = t > 8 ? 4 : 0;
+            if (t > 25) w[WEAVER] = 3;
+            if (t > 45) w[SPLITTER] = 2;
+            if (t > 70) w[LANCER] = 2;
+            if (t > 95 && countType(SINGULARITY) < 1 + int(t > 200)) w[SINGULARITY] = 0.35f;
+            float total = 0;
+            for (float x : w) total += x;
+            float r = frand(0, total);
+            int kind = DRIFTER;
+            for (int k = 0; k < NUM_TYPES; ++k) {
+                if (w[k] <= 0) continue;
+                kind = k;
+                if (r < w[k]) break;
+                r -= w[k];
+            }
+            int count = kind == SINGULARITY ? 1 : 1 + irand(0, 1 + int(t / 35));
+            V2 p = spawnPoint();
+            for (int i = 0; i < count; ++i) spawn(EType(kind), p + V2{frand(-30, 30), frand(-30, 30)});
+        }
+        eventTimer -= dt;
+        if (eventTimer <= 0) {
+            eventTimer = frand(14, 20);
+            spawnEvent();
+        }
+    }
+    void spawnEvent() {
+        float t = gameT;
+        int choice = irand(0, t > 80 ? 3 : 2);
+        if (choice == 0) {  // corners
+            int n = 3 + int(t / 30);
+            EType kind = (t < 60 || frand(0, 1) < 0.6f) ? SEEKER : WEAVER;
+            V2 corners[4] = {{AX0 + 40, AY0 + 40}, {AX1 - 40, AY0 + 40}, {AX0 + 40, AY1 - 40}, {AX1 - 40, AY1 - 40}};
+            for (V2 c : corners) {
+                if (len(c - pp) < 200) continue;
+                for (int i = 0; i < n; ++i) spawn(kind, c + V2{frand(-25, 25), frand(-25, 25)});
+            }
+        } else if (choice == 1) {  // ring around the player
+            int n = 12 + int(t / 20);
+            for (int i = 0; i < n; ++i) {
+                V2 p = pp + fromAng(i * TAU / n) * 320;
+                p.x = std::clamp(p.x, AX0 + 30, AX1 - 30);
+                p.y = std::clamp(p.y, AY0 + 30, AY1 - 30);
+                spawn(t < 50 ? DRIFTER : SEEKER, p);
+            }
+        } else if (choice == 2) {  // wall along one side
+            int n = 10 + int(t / 25);
+            int side = irand(0, 3);
+            for (int i = 0; i < n; ++i) {
+                float f = (i + 0.5f) / n;
+                V2 p = side == 0   ? V2{AX0 + f * (AX1 - AX0), AY0 + 30}
+                       : side == 1 ? V2{AX0 + f * (AX1 - AX0), AY1 - 30}
+                       : side == 2 ? V2{AX0 + 30, AY0 + f * (AY1 - AY0)}
+                                   : V2{AX1 - 30, AY0 + f * (AY1 - AY0)};
+                if (len(p - pp) > 150) spawn(t > 30 ? WEAVER : DRIFTER, p);
+            }
+        } else {  // lancers
+            for (int i = 0; i < 4; ++i) spawn(LANCER, spawnPoint(350));
+        }
+        sfx(Sfx::Charge, 1);
+    }
+
+    // ------------------------------------------------ simulation
+    void fire(V2 aim) {
+        struct Shot { float off, lat; };
+        static const std::vector<Shot> patterns[4] = {
+            {{0, -5}, {0, 5}},
+            {{-0.07f, 0}, {0, 0}, {0.07f, 0}},
+            {{-0.12f, -4}, {-0.04f, 0}, {0.04f, 0}, {0.12f, 4}},
+            {{-0.22f, 0}, {-0.11f, 0}, {0, 0}, {0.11f, 0}, {0.22f, 0}},
+        };
+        static const float cooldowns[4] = {0.095f, 0.09f, 0.08f, 0.075f};
+        float ang = angOf(aim);
+        V2 fwd = fromAng(ang), side = perp(fwd);
+        for (const Shot& s : patterns[weapon]) {
+            V2 d = fromAng(ang + s.off + frand(-0.015f, 0.015f));
+            bullets.push_back({pp + fwd * 16 + side * s.lat, d * BULLET_SPEED + pv * 0.25f});
+        }
+        cooldown = cooldowns[weapon];
+        sfx(Sfx::Shoot, 1, pp.x);
+    }
+
+    void keepIn(Enemy& e) {
+        float r = e.r();
+        if (e.p.x < AX0 + r) { e.p.x = AX0 + r; e.v.x = std::fabs(e.v.x); }
+        else if (e.p.x > AX1 - r) { e.p.x = AX1 - r; e.v.x = -std::fabs(e.v.x); }
+        if (e.p.y < AY0 + r) { e.p.y = AY0 + r; e.v.y = std::fabs(e.v.y); }
+        else if (e.p.y > AY1 - r) { e.p.y = AY1 - r; e.v.y = -std::fabs(e.v.y); }
+    }
+    void seek(Enemy& e, float speed, float turn, float dt) {
+        if (alive) {
+            V2 to = pp - e.p;
+            if (len2(to) > 1) e.v += (norm(to) * speed - e.v) * std::min(1.f, turn * dt);
+        } else {
+            e.v *= std::exp(-2 * dt);
+        }
+    }
+    void enemyAI(Enemy& e, float dt) {
+        switch (e.type) {
+            case DRIFTER: {  // wanders, drifting gently toward you
+                e.ang += e.spin * dt;
+                if (alive && len2(pp - e.p) > 1) e.v += norm(pp - e.p) * (12 * dt);
+                float cap = 130 * e.speed;
+                if (len(e.v) > cap) e.v = norm(e.v) * cap;
+            } break;
+            case SEEKER: {  // homes in
+                seek(e, 215 * e.speed, 2.6f, dt);
+                if (len2(e.v) > 1) e.ang = angOf(e.v);
+            } break;
+            case WEAVER: {  // zig-zags toward you and sidesteps bullets
+                e.ang += dt * 2.5f;
+                V2 desired;
+                if (alive && len2(pp - e.p) > 1) {
+                    V2 fwd = norm(pp - e.p);
+                    desired = fwd * (150 * e.speed) + perp(fwd) * (std::sin(e.t * 4) * 140);
+                }
+                for (auto& b : bullets) {
+                    V2 d = e.p - b.p;
+                    if (len2(d) >= 120 * 120) continue;
+                    V2 bv = norm(b.v);
+                    if (dot(d, bv) <= 0) continue;
+                    float side = d.x * bv.y - d.y * bv.x;
+                    if (std::fabs(side) < 34) {
+                        desired += (side >= 0 ? V2{bv.y, -bv.x} : V2{-bv.y, bv.x}) * 420;
+                        break;
+                    }
+                }
+                e.v += (desired - e.v) * std::min(1.f, 6 * dt);
+            } break;
+            case SPLITTER: {
+                seek(e, 105 * e.speed, 1.5f, dt);
+                e.ang += dt * 1.2f;
+            } break;
+            case SHARD: {  // spirals in
+                if (alive && len2(pp - e.p) > 1) {
+                    V2 f = norm(pp - e.p);
+                    V2 desired = f * (230 * e.speed) + perp(f) * (160.f * e.dir);
+                    e.v += (desired - e.v) * std::min(1.f, 2.5f * dt);
+                }
+                if (len2(e.v) > 1) e.ang = angOf(e.v);
+            } break;
+            case LANCER: {  // lines up a shot, then dashes in a straight line
+                e.timer -= dt;
+                if (e.state == L_DRIFT) {
+                    seek(e, 70 * e.speed, 1, dt);
+                    e.ang += dt * 2;
+                    if (e.timer <= 0 && alive) {
+                        e.state = L_AIM;
+                        e.timer = 0.65f;
+                        sfx(Sfx::Charge, 1, e.p.x);
+                    }
+                } else if (e.state == L_AIM) {
+                    e.v *= std::exp(-8 * dt);
+                    if (alive && len2(pp - e.p) > 1) e.aim = norm(pp - e.p);
+                    e.ang += dt * 16;
+                    if (e.timer <= 0) {
+                        e.state = L_DASH;
+                        e.timer = 0.5f;
+                        e.v = e.aim * (720 * e.speed);
+                    }
+                } else {
+                    emit(e.p, 2, DEFS[LANCER].col, 10, 60, 0.2f, 0.4f);
+                    if (e.timer <= 0) {
+                        e.state = L_DRIFT;
+                        e.timer = frand(1.6f, 2.8f);
+                        e.v *= 0.2f;
+                    }
+                }
+            } break;
+            case SINGULARITY: {  // gravity well; bursts if ignored too long
+                e.age += dt;
+                e.v *= std::exp(-0.5f * dt);
+                if (e.age > 22) burstSingularity(e);
+            } break;
+            default: break;
+        }
+    }
+
+    void updatePlay(float dt) {
+        gameT += dt;
+        if (opt.autoplay) autopilot();
+        std::vector<V2> sings;
+        for (auto& e : enemies)
+            if (e.type == SINGULARITY && !e.dead && !e.spawning()) sings.push_back(e.p);
+
+        if (alive) {
+            pv += (inMove * PLAYER_SPEED - pv) * std::min(1.f, 14 * dt);
+            for (V2 s : sings) {
+                V2 d = s - pp;
+                float dist = len(d);
+                if (dist > 1 && dist < 420) pv += d / dist * (52000 / std::max(dist, 50.f) * dt);
+            }
+            pp += pv * dt;
+            pp.x = std::clamp(pp.x, AX0 + PLAYER_R, AX1 - PLAYER_R);
+            pp.y = std::clamp(pp.y, AY0 + PLAYER_R, AY1 - PLAYER_R);
+            if (len2(inMove) > 0.01f) {
+                pang += wrapAng(angOf(inMove) - pang) * std::min(1.f, 16 * dt);
+                float back = pang + PI;
+                emit(pp + fromAng(back) * 12, 2, rgb(255, 160, 60), 80, 220, 0.15f, 0.35f, back, 0.6f, 30);
+            }
+            invuln = std::max(0.f, invuln - dt);
+            cooldown -= dt;
+            if (len2(inAim) > 0.01f && cooldown <= 0) fire(inAim);
+        } else if (lives > 0) {
+            respawn -= dt;
+            if (respawn <= 0) {
+                pp = {W / 2.f, H / 2.f};
+                pv = {};
+                pang = -PI / 2;
+                alive = true;
+                invuln = 2;
+                cooldown = 0;
+                grid.impulse(pp, -900, 300);
+                spawnTimer = 1.5f;
+            }
+        } else {
+            gameoverTimer -= dt;
+            if (gameoverTimer <= 0) {
+                mode = Mode::GameOver;
+                audio.setMusicLevel(0.25f);
+                if (score > hiscore) {
+                    hiscore = score;
+                    newHigh = true;
+                    saveHigh();
+                }
+            }
         }
 
-        if (opt.autoplay) autopilot();
-        if (alive) gameT += sdt;
-        updatePlayer(sdt);
-        if (mode != Mode::Play) return;
-        updateBullets(sdt);
-        updateEnemies(sdt);
-        collisions();
-        if (alive) director(sdt);
+        // bullets: bent by singularities, sparks where they hit the wall
+        for (auto& b : bullets) {
+            for (V2 s : sings) {
+                V2 d = s - b.p;
+                float d2 = len2(d);
+                if (d2 > 1 && d2 < 220 * 220) b.v += d * (3.2e6f / (d2 * std::sqrt(d2)) * dt);
+            }
+            b.p += b.v * dt;
+            if (b.p.x < AX0 || b.p.x >= AX1 || b.p.y < AY0 || b.p.y >= AY1) {
+                b.dead = true;
+                V2 c{std::clamp(b.p.x, AX0, AX1), std::clamp(b.p.y, AY0, AY1)};
+                emit(c, 5, rgb(255, 220, 120), 60, 240, 0.15f, 0.4f);
+            }
+        }
+        for (auto& b : bullets) grid.pushBullet(b.p, b.v, dt);
+
+        // enemies
+        for (size_t i = 0; i < enemies.size(); ++i) {
+            Enemy& e = enemies[i];
+            if (e.dead) continue;
+            e.t += dt;
+            if (e.spawn > 0) {
+                e.spawn -= dt;
+                continue;
+            }
+            e.flash = std::max(0.f, e.flash - dt);
+            enemyAI(e, dt);
+            e.p += e.v * dt;
+            keepIn(e);
+        }
+
+        // bullet vs enemy
+        for (auto& b : bullets) {
+            if (b.dead) continue;
+            for (auto& e : enemies) {
+                if (e.dead || e.spawning()) continue;
+                float r = e.r() + 5;
+                if (len2(e.p - b.p) < r * r) {
+                    b.dead = true;
+                    hitEnemy(e, b);
+                    break;
+                }
+            }
+        }
+
+        // enemy vs player
+        if (alive && invuln <= 0) {
+            for (auto& e : enemies) {
+                if (e.dead || e.spawning()) continue;
+                float r = e.r() + PLAYER_R - 3;
+                if (len2(e.p - pp) < r * r) {
+                    playerDie();
+                    break;
+                }
+            }
+        }
+
+        // bomb shockwaves sweep the arena, scoring everything they touch
+        for (auto& w : waves) {
+            w.r += 1600 * dt;
+            for (auto& e : enemies)
+                if (!e.dead && len(e.p - w.c) < w.r) killEnemy(e, true, false);
+        }
+        waves.erase(std::remove_if(waves.begin(), waves.end(), [](const Wave& w) { return w.r >= 1600; }), waves.end());
 
         bullets.erase(std::remove_if(bullets.begin(), bullets.end(), [](const Bullet& b) { return b.dead; }), bullets.end());
         enemies.erase(std::remove_if(enemies.begin(), enemies.end(), [](const Enemy& e) { return e.dead; }), enemies.end());
-        for (auto& e : pending) enemies.push_back(e);
+
+        for (V2 s : sings) grid.impulse(s, -1500 * dt, 170);
+        updateSpawner(dt);
+        for (auto& e : pending)
+            if (!e.dead) enemies.push_back(e);
         pending.clear();
+        updateFx(dt, sings);
+    }
+
+    void updateFx(float dt, const std::vector<V2>& attractors = {}) {
+        updateParticles(dt, attractors);
+        grid.update(dt);
+        for (auto& f : floaters) {
+            f.p.y -= 30 * dt;
+            f.life -= dt;
+        }
+        floaters.erase(std::remove_if(floaters.begin(), floaters.end(), [](const Floater& f) { return f.life <= 0; }),
+                       floaters.end());
+        for (auto& b : banners) b.life -= dt;
+        banners.erase(std::remove_if(banners.begin(), banners.end(), [](const Banner& b) { return b.life <= 0; }),
+                      banners.end());
+        shake *= std::exp(-6 * dt);
+    }
+
+    void updateTitle(float dt) {
+        titleTimer -= dt;
+        if (titleTimer <= 0) {
+            titleTimer = frand(0.4f, 1.0f);
+            V2 p{frand(AX0 + 60, AX1 - 60), frand(AY0 + 60, AY1 - 60)};
+            static const EType kinds[5] = {DRIFTER, SEEKER, WEAVER, SPLITTER, LANCER};
+            emit(p, 120, DEFS[kinds[irand(0, 4)]].col, 100, 600);
+            grid.impulse(p, 700, 160);
+        }
+        updateFx(dt);
+    }
+
+    void step(float dt) {
+        clock += dt;
+        std::fill(std::begin(sfxUsed), std::end(sfxUsed), 0);
+        switch (mode) {
+            case Mode::Play: updatePlay(dt); break;
+            case Mode::Title: updateTitle(dt); break;
+            case Mode::GameOver:
+                gameoverTimer -= dt;
+                updateFx(dt);
+                break;
+            case Mode::Paused: break;
+        }
     }
 
     // Test bot: orbit the arena, flee close threats, shoot the nearest enemy.
@@ -1095,9 +1111,8 @@ struct Game {
         V2 c{W / 2.f, H / 2.f};
         V2 orbit = perp(norm(pp - c)) * 0.6f + (c - pp) / 700.f;
         inMove = norm(orbit + flee * 2.5f);
-        inAim = nearest ? norm(nearest->p - pp) : fromAng(clock * 2);
-        inFire = nearest != nullptr;
-        if (best < 40 && bombs > 0 && invT <= 0) useBomb();
+        inAim = nearest ? norm(nearest->p - pp) : V2{};
+        if (best < 40 && bombs > 0 && invuln <= 0) useBomb();
     }
 
     // ------------------------------------------------ input
@@ -1123,53 +1138,31 @@ struct Game {
         if (opt.autoplay) return;
         inMove = {};
         inAim = {};
-        inFire = false;
+        float trig = 0;
         if (pad) {
             auto ax = [&](SDL_GamepadAxis a) { return SDL_GetGamepadAxis(pad, a) / 32767.f; };
-            inMove = deadzone(ax(SDL_GAMEPAD_AXIS_LEFTX), ax(SDL_GAMEPAD_AXIS_LEFTY), 0.2f);
-            V2 aim = deadzone(ax(SDL_GAMEPAD_AXIS_RIGHTX), ax(SDL_GAMEPAD_AXIS_RIGHTY), 0.25f);
-            if (len(aim) > 0.3f) {
-                inAim = aim;
-                inFire = true;
-                usingMouse = false;
-            }
-            if (len(inMove) > 0) usingMouse = false;
+            inMove = deadzone(ax(SDL_GAMEPAD_AXIS_LEFTX), ax(SDL_GAMEPAD_AXIS_LEFTY), 0.22f);
+            inAim = deadzone(ax(SDL_GAMEPAD_AXIS_RIGHTX), ax(SDL_GAMEPAD_AXIS_RIGHTY), 0.3f);
+            trig = std::max(ax(SDL_GAMEPAD_AXIS_LEFT_TRIGGER), ax(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
         }
+        if (trig > 0.6f && !trigHeld) useBomb();  // trigger edge -> bomb
+        trigHeld = trig > 0.6f;
+
         const bool* k = SDL_GetKeyboardState(nullptr);
         V2 km{float(k[SDL_SCANCODE_D] - k[SDL_SCANCODE_A]), float(k[SDL_SCANCODE_S] - k[SDL_SCANCODE_W])};
-        if (len(km) > 0) inMove = norm(km);
+        if (len2(km) > 0) inMove = norm(km);
         V2 ka{float(k[SDL_SCANCODE_RIGHT] - k[SDL_SCANCODE_LEFT]), float(k[SDL_SCANCODE_DOWN] - k[SDL_SCANCODE_UP])};
-        if (len(ka) > 0) {
-            inAim = norm(ka);
-            inFire = true;
-        }
+        if (len2(ka) > 0) inAim = norm(ka);
         float mx, my;
-        SDL_MouseButtonFlags mb = SDL_GetMouseState(&mx, &my);
-        int ww, wh, ow, oh;
-        SDL_GetWindowSize(win, &ww, &wh);
-        SDL_GetRenderOutputSize(ren, &ow, &oh);
-        SDL_FRect lb = letterbox();
-        float px = mx * ow / float(std::max(1, ww)), py = my * oh / float(std::max(1, wh));
-        mouseGame = {(px - lb.x) * W / lb.w, (py - lb.y) * H / lb.h};
-        if (mb & SDL_BUTTON_LMASK) {
-            usingMouse = true;
-            inAim = norm(mouseGame - pp);
-            inFire = true;
+        if (SDL_GetMouseState(&mx, &my) & SDL_BUTTON_LMASK) {
+            int ww, wh, ow, oh;
+            SDL_GetWindowSize(win, &ww, &wh);
+            SDL_GetRenderOutputSize(ren, &ow, &oh);
+            SDL_FRect lb = letterbox();
+            float px = mx * ow / float(std::max(1, ww)), py = my * oh / float(std::max(1, wh));
+            V2 d = V2{(px - lb.x) * W / lb.w, (py - lb.y) * H / lb.h} - pp;
+            if (len2(d) > 4) inAim = norm(d);
         }
-    }
-    void confirm() {
-        if (mode == Mode::Title) startGame();
-        else if (mode == Mode::GameOver && modeT > 1.2f) startGame();
-        else if (mode == Mode::Paused) { mode = Mode::Play; SDL_HideCursor(); }
-    }
-    void pauseToggle() {
-        if (mode == Mode::Play) { mode = Mode::Paused; SDL_ShowCursor(); }
-        else if (mode == Mode::Paused) { mode = Mode::Play; SDL_HideCursor(); }
-        else confirm();
-    }
-    void back() {
-        if (mode == Mode::Title) running = false;
-        else if (mode == Mode::Paused || mode == Mode::GameOver) toTitle();
     }
     void handle(const SDL_Event& ev) {
         switch (ev.type) {
@@ -1179,7 +1172,7 @@ struct Game {
                 if (pad && SDL_GetGamepadID(pad) == ev.gdevice.which) {
                     SDL_CloseGamepad(pad);
                     pad = nullptr;
-                    if (mode == Mode::Play) pauseToggle();
+                    if (mode == Mode::Play) mode = Mode::Paused;
                     int n = 0;
                     if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
                         if (n > 0) openPad(ids[0]);
@@ -1191,45 +1184,41 @@ struct Game {
                 if (opt.autoplay) break;
                 switch (ev.gbutton.button) {
                     case SDL_GAMEPAD_BUTTON_SOUTH: confirm(); break;
-                    case SDL_GAMEPAD_BUTTON_START: pauseToggle(); break;
+                    case SDL_GAMEPAD_BUTTON_START:
+                        if (mode == Mode::Play) mode = Mode::Paused;
+                        else if (mode == Mode::Paused) mode = Mode::Play;
+                        else confirm();
+                        break;
                     case SDL_GAMEPAD_BUTTON_BACK:
-                    case SDL_GAMEPAD_BUTTON_EAST: back(); break;
+                        if (mode == Mode::Title) running = false;
+                        else if (mode == Mode::Paused || mode == Mode::GameOver) toTitle();
+                        break;
                     case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
                     case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: useBomb(); break;
                     case SDL_GAMEPAD_BUTTON_NORTH: audio.toggleMusic(); break;
                     default: break;
                 }
                 break;
-            case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
-                int which = ev.gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? 0 : ev.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER ? 1 : -1;
-                if (which < 0) break;
-                if (ev.gaxis.value > 16000 && !trigHeld[which]) {
-                    trigHeld[which] = true;
-                    if (!opt.autoplay) useBomb();
-                } else if (ev.gaxis.value < 8000) {
-                    trigHeld[which] = false;
-                }
-            } break;
             case SDL_EVENT_KEY_DOWN:
                 if (ev.key.repeat) break;
                 switch (ev.key.key) {
                     case SDLK_ESCAPE:
-                        if (mode == Mode::Title || mode == Mode::GameOver) back();
-                        else pauseToggle();
+                        if (mode == Mode::Title) running = false;
+                        else if (mode == Mode::Play) mode = Mode::Paused;
+                        else if (mode == Mode::Paused) mode = Mode::Play;
+                        else toTitle();
                         break;
                     case SDLK_RETURN:
                     case SDLK_KP_ENTER:
                         if (ev.key.mod & SDL_KMOD_ALT) toggleFullscreen();
                         else confirm();
                         break;
-                    case SDLK_SPACE:
-                        if (mode == Mode::Play) useBomb();
-                        else confirm();
-                        break;
                     case SDLK_Q:
                         if (mode == Mode::Paused) toTitle();
                         break;
+                    case SDLK_SPACE: useBomb(); break;
                     case SDLK_M: audio.toggleMusic(); break;
+                    case SDLK_F3: showFps = !showFps; break;
                     case SDLK_F11: toggleFullscreen(); break;
                     default: break;
                 }
@@ -1237,7 +1226,6 @@ struct Game {
             case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 if (ev.button.button == SDL_BUTTON_RIGHT) useBomb();
                 break;
-            case SDL_EVENT_MOUSE_MOTION: usingMouse = true; break;
             default: break;
         }
     }
@@ -1247,208 +1235,128 @@ struct Game {
     }
 
     // ------------------------------------------------ rendering
+    // text centred on (x, cy)
+    void textC(const std::string& s, float cy, float size, Col c, float x = W / 2.f) {
+        drawText(dr, s, {x, cy - size / 2}, size, c, 0.5f);
+    }
+
     void drawEnemy(const Enemy& e) {
         const EnemyDef& d = DEFS[e.type];
-        Col c = d.col;
-        float sc = 1;
-        if (e.spawnT > 0) {
-            float k = e.spawnT / SPAWN_TIME;
-            sc = 1 + 2.2f * k;
-            c = withA(c, (1 - k) * (0.6f + 0.4f * std::sin(e.t * 50)));
-        }
-        if (e.hitFlash > 0) c = mix(c, WHITE, 0.7f);
-        switch (e.type) {
-            case DRIFTER:
-                dr.poly(SH_DRIFTER, e.p, e.ang, sc, 2.4f, c);
-                dr.poly(SH_DRIFTER_IN, e.p, -e.ang, sc, 1.6f, c * 0.7f);
-                break;
-            case SEEKER:
-                dr.poly(SH_SEEKER, e.p, e.ang, sc, 2.4f, c);
-                dr.line(e.p + rot({-12, 0}, e.ang) * sc, e.p + rot({16, 0}, e.ang) * sc, 1.4f, c * 0.6f);
-                break;
-            case WEAVER:
-                dr.poly(SH_WEAVER, e.p, e.ang, sc, 2.4f, c);
-                dr.poly(SH_WEAVER_IN, e.p, -e.ang * 1.7f, sc, 1.6f, c * 0.8f);
-                break;
-            case SPLITTER:
-                dr.poly(SH_SPLITTER, e.p, e.ang, sc, 2.4f, c);
-                dr.poly(ngon(5, 5, e.ang), e.p, 0, sc, 1.4f, c * 0.7f);
-                break;
-            case SHARD: dr.poly(SH_SHARD, e.p, e.ang, sc, 2.f, c); break;
-            case LANCER: {
-                dr.poly(SH_LANCER, e.p, e.ang, sc, 2.4f, c);
-                if (e.spawnT <= 0 && e.state == 0 && e.timer < 0.9f) {
-                    V2 dir = fromAng(e.ang);
-                    float tx = dir.x > 0 ? (AX1 - e.p.x) / dir.x : dir.x < 0 ? (AX0 - e.p.x) / dir.x : 1e9f;
-                    float ty = dir.y > 0 ? (AY1 - e.p.y) / dir.y : dir.y < 0 ? (AY0 - e.p.y) / dir.y : 1e9f;
-                    float L = std::min(tx, ty);
-                    float k = 1 - e.timer / 0.9f;
-                    for (float s = 26; s < L - 6; s += 26)
-                        dr.line(e.p + dir * s, e.p + dir * std::min(L, s + 12), 1.3f, c * (0.15f + 0.5f * k));
-                }
-            } break;
-            case SINGULARITY: {
-                float pulse = 1 + 0.07f * std::sin(e.t * 6 + e.fed);
-                float R = e.r * pulse * sc;
-                Col ring = e.hitFlash > 0 ? WHITE : c;
-                dr.circle(e.p, R, 2.6f, ring, 36);
-                dr.circle(e.p, R * 0.68f, 1.8f, mix(ring, {0.4f, 0.8f, 1}, 0.5f), 28);
-                dr.poly(ngon(3, R * 0.45f), e.p, e.t * 2.5f, 1, 1.8f, mix(ring, WHITE, 0.3f));
-                dr.poly(ngon(3, R * 0.45f), e.p, -e.t * 1.7f + PI, 1, 1.2f, ring * 0.6f);
-                if (e.spawnT <= 0) dr.circle(e.p, SING_RANGE * (0.96f + 0.04f * std::sin(e.t * 2)), 1.f, c * 0.07f, 64);
-            } break;
-            default: break;
-        }
-    }
-
-    void drawPrism(V2 c, float s, float t) {
-        // rotating 3D triangular prism, the game's emblem
-        V2 tri[3] = {{0, -1}, {0.866f, 0.5f}, {-0.866f, 0.5f}};
-        float ay = t * 0.9f, ax = 0.35f + 0.2f * std::sin(t * 0.6f);
-        auto proj = [&](float x, float y, float z) {
-            float x1 = x * std::cos(ay) + z * std::sin(ay), z1 = -x * std::sin(ay) + z * std::cos(ay);
-            float y1 = y * std::cos(ax) - z1 * std::sin(ax), z2 = y * std::sin(ax) + z1 * std::cos(ax);
-            float k = 3.2f / (3.2f + z2);
-            return V2{c.x + x1 * s * k, c.y + y1 * s * k};
-        };
-        V2 a[3], b[3];
-        for (int i = 0; i < 3; ++i) {
-            a[i] = proj(tri[i].y * 0.9f, tri[i].x * 0.9f - 0.0f, -1.1f);
-            b[i] = proj(tri[i].y * 0.9f, tri[i].x * 0.9f, 1.1f);
-        }
-        for (int i = 0; i < 3; ++i) {
-            Col ci = hsv(t * 0.08f + i / 3.f, 0.6f, 1);
-            dr.line(a[i], a[(i + 1) % 3], 2.4f, ci);
-            dr.line(b[i], b[(i + 1) % 3], 2.4f, ci);
-            dr.line(a[i], b[i], 2.f, ci * 0.8f);
-        }
-    }
-
-    void drawHUD() {
-        drawText(dr, commas(score), {40, 36}, 26, {0.85f, 0.95f, 1}, 0);
-        drawText(dr, "X" + std::to_string(mult), {40, 72}, 18, {0.4f, 0.9f, 1}, 0);
-        drawText(dr, "HI " + commas(std::max(hiscore, score)), {W / 2.f, 38}, 15, {0.5f, 0.6f, 0.9f}, 0.5f);
-        auto icons = [&](int n, float y, Col c, bool ship) {
-            int shown = n > 5 ? 1 : n;
-            for (int i = 0; i < shown; ++i) {
-                V2 p{W - 52.f - i * 30, y};
-                if (ship) dr.poly(SH_PLAYER, p, -PI / 2, 0.75f, 1.7f, c);
-                else dr.circle(p, 8, 1.7f, c, 20);
+        Col col = e.flash > 0 ? WHITE : d.col;
+        if (e.type == SINGULARITY) {
+            if (e.spawn > 0) {
+                float k = e.spawn / d.spawnTime;
+                dr.circle(e.p, d.r * (1 + 3 * k), 1.6f, d.col * (1 - k));
+                return;
             }
-            if (n > 5) drawText(dr, std::to_string(n) + "X", {W - 72.f, y - 8}, 16, c, 1);
-        };
-        icons(lives, 50, {0.85f, 0.95f, 1}, true);
-        icons(bombs, 84, {1, 0.75f, 0.3f}, false);
-        if (bannerT > 0) {
-            float a = clamp01(bannerT / 0.4f) * clamp01((2.2f - bannerT) / 0.15f);
-            drawText(dr, banner, {W / 2.f, 150}, 30, withA(bannerC, a), 0.5f);
+            float pulse = 1 + 0.08f * std::sin(clock * 6 + e.t);
+            float urgency = std::max(0.f, (e.age - 14) / 8);
+            if (urgency > 0 && int(clock * (6 + 20 * urgency)) % 2 == 0) col = rgb(255, 200, 200);
+            dr.circle(e.p, d.r * pulse, 2.4f, col);
+            for (int i = 0; i < 3; ++i) {
+                float r = d.r * (0.35f + 0.2f * i) * pulse;
+                float a0 = clock * (3 - i) * (i % 2 ? 1 : -1);
+                for (int j = 0; j < 3; ++j) dr.arc(e.p, r, a0 + j * TAU / 3, a0 + j * TAU / 3 + 1.2f, 1.6f, col * 0.8f);
+            }
+            dr.arc(e.p, d.r + 7, 0, TAU * e.hp / d.hp, 0.9f, d.col * 0.5f, 48);  // health ring
+            return;
         }
+        float sc = 1;
+        if (e.spawn > 0) {
+            float k = e.spawn / d.spawnTime;
+            sc = 1 + 2.2f * k;
+            col = d.col * ((1 - k) * (0.6f + 0.4f * std::sin(clock * 40)));
+        }
+        if (e.type == LANCER && e.state == L_AIM && e.spawn <= 0) {
+            float k = 1 - e.timer / 0.65f;
+            dr.line(e.p, e.p + e.aim * 900, 0.8f, d.col * (0.15f + 0.35f * k));
+        }
+        for (auto& s : d.shapes) dr.poly(s, e.p, e.ang, sc, 2.f, col);
     }
 
     void drawWorld() {
-        float t = clock;
-        grid.draw(dr, t);
-        Col border = mix({0.3f, 0.5f, 1}, {0.7f, 0.9f, 1}, 0.5f + 0.5f * std::sin(t * 1.3f));
-        V2 c0{AX0, AY0}, c1{AX1, AY0}, c2{AX1, AY1}, c3{AX0, AY1};
-        dr.line(c0, c1, 2.4f, border);
-        dr.line(c1, c2, 2.4f, border);
-        dr.line(c2, c3, 2.4f, border);
-        dr.line(c3, c0, 2.4f, border);
+        grid.draw(dr, clock);
+        Col border = hsvDeg(220 + 40 * std::sin(clock * 0.5f), 0.6f, 0.9f);
+        V2 c0{AX0 - 3, AY0 - 3}, c1{AX1 + 3, AY0 - 3}, c2{AX1 + 3, AY1 + 3}, c3{AX0 - 3, AY1 + 3};
+        dr.line(c0, c1, 1.4f, border);
+        dr.line(c1, c2, 1.4f, border);
+        dr.line(c2, c3, 1.4f, border);
+        dr.line(c3, c0, 1.4f, border);
 
         for (auto& p : parts) {
-            float k = p.life / p.maxLife;
-            V2 tail = p.v * 0.028f;
-            if (len2(tail) < 4) tail = norm(p.v) * 2;
-            dr.line(p.p - tail, p.p, p.w * (0.5f + 0.5f * k), p.c * k);
+            float f = clamp01(p.life / p.maxLife);
+            dr.line(p.p, p.p - p.v * 0.035f, 1.4f, p.c * (f * (2 - f)));
         }
-        for (auto& b : bullets) dr.line(b.p - b.v * 0.013f, b.p, 2.4f, {1, 0.92f, 0.55f});
+        if (mode == Mode::Title) return;
         for (auto& e : enemies)
             if (!e.dead) drawEnemy(e);
+        for (auto& b : bullets) {
+            V2 d = norm(b.v) * 16;
+            dr.line(b.p, b.p - d, 2.f, rgb(255, 235, 150));
+            dr.line(b.p, b.p - d * 0.4f, 1.4f, WHITE);
+        }
+        if (alive && !(invuln > 0 && int(clock * 16) % 2 == 0)) {
+            dr.poly(SH_PLAYER, pp, pang, 1, 2.6f, rgb(235, 245, 255));
+            dr.poly(SH_PLAYER_IN, pp, pang, 1, 1.8f, rgb(120, 220, 255));
+        }
+        for (auto& w : waves) dr.circle(w.c, w.r, 3.f, rgb(200, 230, 255) * (1 - w.r / 1600), 96);
+        for (auto& f : floaters) textC(f.s, f.p.y, 11, f.c * std::min(1.f, f.life * 2), f.p.x);
+    }
 
-        if ((mode == Mode::Play || mode == Mode::Paused) && alive) {
-            bool blink = invT > 0 && std::fmod(clock, 0.16f) < 0.08f;
-            if (!blink) {
-                dr.poly(SH_PLAYER, pp, pang, 1, 2.6f, {0.9f, 0.97f, 1});
-                dr.poly(SH_PLAYER, pp, pang, 0.45f, 1.4f, {0.4f, 0.8f, 1});
-            }
-            if (usingMouse && !opt.autoplay && mode == Mode::Play) {
-                V2 m = mouseGame;
-                dr.circle(m, 9, 1.4f, {0.6f, 0.9f, 1, 0.8f}, 16);
-                dr.line(m - V2{14, 0}, m - V2{6, 0}, 1.2f, {0.6f, 0.9f, 1, 0.8f});
-                dr.line(m + V2{14, 0}, m + V2{6, 0}, 1.2f, {0.6f, 0.9f, 1, 0.8f});
-            }
+    void drawHUD() {
+        drawText(dr, commas(score), {40, 42}, 26, WHITE);
+        drawText(dr, "X" + std::to_string(multiplier()), {42, 82}, 16, rgb(255, 220, 120));
+        drawText(dr, "HI " + commas(std::max(hiscore, score)), {W - 40.f, 44}, 16, rgb(180, 200, 255), 1);
+        for (int i = 0; i < std::min(lives, 8); ++i)
+            dr.poly(SH_PLAYER, {W / 2.f - 120 + i * 30, 52}, -PI / 2, 0.75f, 1.6f, rgb(235, 245, 255));
+        for (int i = 0; i < std::min(bombs, 8); ++i) {
+            V2 c{W / 2.f + 60 + i * 26, 52};
+            dr.circle(c, 9, 1.4f, rgb(255, 200, 90), 24);
+            dr.dot(c, 4.5f, rgb(255, 200, 90));
         }
-        if (bombRingT >= 0) {
-            float k = bombRingT / 0.7f;
-            dr.circle(bombRingP, 30 + 1500 * k, 6 * (1 - k) + 1, Col{0.6f, 0.9f, 1} * (1 - k), 96);
-        }
-        for (auto& f : floaters) drawText(dr, f.s, f.p, 16, withA(f.c, clamp01(f.t)), 0.5f);
+        size_t first = banners.size() > 3 ? banners.size() - 3 : 0;
+        for (size_t i = first; i < banners.size(); ++i)
+            textC(banners[i].s, H / 2.f - 140 + (i - first) * 50, 24, banners[i].c * std::min(1.f, banners[i].life * 1.5f));
     }
 
     void drawOverlay() {
         float t = clock;
         if (mode == Mode::Title) {
-            drawPrism({W / 2.f, 168}, 70, t);
-            const std::string title = "PRISM";
-            float size = 104, x = W / 2.f - textWidth(title, size) / 2;
-            for (size_t i = 0; i < title.size(); ++i) {
-                drawText(dr, std::string(1, title[i]), {x, 270}, size, hsv(t * 0.07f + i * 0.12f, 0.55f, 1), 0, 4.5f);
-                x += 5.5f * size / 6;
-            }
-            drawText(dr, "A NEON ARENA SHOOTER", {W / 2.f, 398}, 16, {0.5f, 0.6f, 0.9f}, 0.5f);
-            float a = 0.55f + 0.45f * std::sin(t * 4);
-            drawText(dr, pad ? "PRESS A TO START" : "PRESS ENTER TO START", {W / 2.f, 460}, 24, withA({1, 1, 1}, a), 0.5f);
-            drawText(dr, "HIGH SCORE  " + commas(hiscore), {W / 2.f, 508}, 16, {1, 0.8f, 0.35f}, 0.5f);
-            Col dim{0.45f, 0.55f, 0.8f};
-            drawText(dr, "LEFT STICK MOVE    RIGHT STICK FIRE    BUMPERS/TRIGGERS BOMB    START PAUSE    Y MUSIC",
-                     {W / 2.f, 584}, 11, dim, 0.5f);
-            drawText(dr, "KEYS: WASD MOVE    MOUSE/ARROWS FIRE    SPACE/RMB BOMB    ESC PAUSE    M MUSIC    F11 FULLSCREEN",
-                     {W / 2.f, 608}, 11, dim, 0.5f);
-            std::string padName = pad ? SDL_GetGamepadName(pad) : "";
-            drawText(dr, pad ? "CONTROLLER: " + padName : "NO CONTROLLER FOUND - KEYBOARD AND MOUSE", {W / 2.f, 650}, 11,
-                     pad ? Col{0.4f, 1, 0.5f} : Col{1, 0.5f, 0.4f}, 0.5f);
-        } else if (mode == Mode::Paused) {
-            dr.solid({0, 0}, {W, 0}, {W, H}, {0, H}, {0.02f, 0.03f, 0.08f, 1});
-            drawText(dr, "PAUSED", {W / 2.f, 280}, 60, {0.8f, 0.9f, 1}, 0.5f, 3.5f);
-            drawText(dr, pad ? "A RESUME    BACK QUIT TO TITLE" : "ESC RESUME    Q QUIT TO TITLE", {W / 2.f, 380}, 18,
-                     {0.5f, 0.6f, 0.9f}, 0.5f);
-        } else if (mode == Mode::GameOver) {
-            drawText(dr, "GAME OVER", {W / 2.f, 230}, 72, {1, 0.35f, 0.45f}, 0.5f, 4.f);
-            drawText(dr, commas(score), {W / 2.f, 350}, 40, {0.9f, 0.95f, 1}, 0.5f, 2.6f);
-            if (newHigh)
-                drawText(dr, "NEW HIGH SCORE!", {W / 2.f, 412}, 22, hsv(t * 0.5f, 0.6f, 1), 0.5f);
+            textC("PRISM ARENA", H / 2.f - 130, 64, hsvDeg(t * 40, 0.6f, 1));
+            if (int(t * 2) % 2 == 0) textC("PRESS  A  OR  START", H / 2.f + 10, 24, WHITE);
+            Col help = rgb(170, 190, 230);
+            textC("LEFT STICK  MOVE     RIGHT STICK  AIM + FIRE     RB / LB / TRIGGERS  BOMB     START  PAUSE     Y  MUSIC",
+                  H / 2.f + 110, 11, help);
+            textC("KEYBOARD: WASD MOVE  -  MOUSE OR ARROWS AIM + FIRE  -  SPACE BOMB  -  ESC PAUSE  -  M MUSIC  -  F11 FULLSCREEN",
+                  H / 2.f + 140, 11, help);
+            if (pad)
+                textC(std::string("CONTROLLER: ") + SDL_GetGamepadName(pad), H - 90.f, 11, rgb(120, 255, 160));
             else
-                drawText(dr, "HIGH SCORE  " + commas(hiscore), {W / 2.f, 412}, 18, {1, 0.8f, 0.35f}, 0.5f);
-            if (modeT > 1.2f)
-                drawText(dr, pad ? "A PLAY AGAIN    BACK TITLE" : "ENTER PLAY AGAIN    ESC TITLE", {W / 2.f, 490}, 20,
-                         withA({1, 1, 1}, 0.6f + 0.4f * std::sin(t * 4)), 0.5f);
+                textC("NO CONTROLLER DETECTED - KEYBOARD / MOUSE", H - 90.f, 11, rgb(255, 150, 120));
+            textC("HIGH SCORE  " + commas(hiscore), H - 130.f, 16, rgb(255, 220, 120));
+        } else if (mode == Mode::Paused) {
+            textC("PAUSED", H / 2.f - 40, 64, WHITE);
+            textC("START / A RESUME     BACK / Q QUIT TO TITLE", H / 2.f + 50, 16, rgb(190, 200, 230));
+        } else if (mode == Mode::GameOver) {
+            textC("GAME OVER", H / 2.f - 80, 64, rgb(255, 80, 100));
+            textC(commas(score), H / 2.f + 10, 26, WHITE);
+            if (newHigh && int(t * 3) % 2 == 0) textC("NEW HIGH SCORE!", H / 2.f + 65, 26, rgb(255, 220, 120));
+            if (gameoverTimer <= -1) textC("PRESS A TO CONTINUE", H / 2.f + 130, 16, rgb(190, 200, 230));
         }
     }
 
     void render() {
+        // world (shaken) -> scene; the title glows, so it goes in the scene too
         dr.off = shake > 0.3f ? V2{frand(-shake, shake), frand(-shake, shake)} : V2{};
         SDL_SetRenderTarget(ren, scene);
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
         SDL_RenderClear(ren);
         drawWorld();
-        if (mode != Mode::Paused) {
-            dr.off = {};
-            if (mode == Mode::Play) drawHUD();
-            drawOverlay();
-        }
-        if (flash > 0) dr.solid({0, 0}, {W, 0}, {W, H}, {0, H}, withA({0.8f, 0.9f, 1}, flash * 0.35f));
+        dr.off = {};
+        if (mode == Mode::Title) textC("PRISM ARENA", H / 2.f - 130, 64, hsvDeg(clock * 40, 0.6f, 1));
         dr.flush();
-        if (mode == Mode::Paused) {  // dim world (overlay drawn crisp after bloom)
-            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
-            SDL_SetRenderDrawColor(ren, 0, 0, 0, 170);
-            SDL_RenderFillRect(ren, nullptr);
-            dr.off = {};
-            drawOverlay();
-            dr.flush();
-        }
 
         // bloom: halve down the chain, then add each level back up
-        SDL_SetTextureBlendMode(scene, SDL_BLENDMODE_NONE);
         SDL_Texture* src = scene;
         for (int i = 0; i < 4; ++i) {
             SDL_SetRenderTarget(ren, bloom[i]);
@@ -1464,14 +1372,29 @@ struct Game {
             SDL_RenderTexture(ren, bloom[i], nullptr, nullptr);
         }
 
+        // frame = scene + glow, then crisp HUD and overlays on top
+        SDL_SetRenderTarget(ren, frame);
+        SDL_SetTextureBlendMode(scene, SDL_BLENDMODE_NONE);
+        SDL_RenderTexture(ren, scene, nullptr, nullptr);
+        SDL_SetTextureBlendMode(bloom[0], SDL_BLENDMODE_ADD);
+        SDL_SetTextureColorMod(bloom[0], 190, 190, 190);
+        SDL_RenderTexture(ren, bloom[0], nullptr, nullptr);
+        if (mode == Mode::Paused) {
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren, 0, 0, 0, 140);
+            SDL_RenderFillRect(ren, nullptr);
+        }
+        if (mode != Mode::Title) drawHUD();
+        drawOverlay();
+        if (showFps) drawText(dr, std::to_string(int(fps + 0.5f)) + " FPS", {W - 10.f, H - 18.f}, 11, rgb(120, 255, 120), 1);
+        dr.flush();
+
         SDL_SetRenderTarget(ren, nullptr);
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
         SDL_RenderClear(ren);
         SDL_FRect dst = letterbox();
-        SDL_RenderTexture(ren, scene, nullptr, &dst);
-        SDL_SetTextureBlendMode(bloom[0], SDL_BLENDMODE_ADD);
-        SDL_SetTextureColorMod(bloom[0], 190, 190, 190);
-        SDL_RenderTexture(ren, bloom[0], nullptr, &dst);
+        SDL_SetTextureBlendMode(frame, SDL_BLENDMODE_NONE);
+        SDL_RenderTexture(ren, frame, nullptr, &dst);
 
         if (!opt.shot.empty() && clock >= opt.shotAt) {
             if (SDL_Surface* s = SDL_RenderReadPixels(ren, nullptr)) {
@@ -1501,16 +1424,20 @@ struct Game {
             double dt = double(now - last) / SDL_GetPerformanceFrequency();
             last = now;
             acc += std::min(dt, 0.1);
+            fpsT += float(dt);
+            if (++fpsFrames, fpsT >= 0.5f) {
+                fps = fpsFrames / fpsT;
+                fpsT = 0;
+                fpsFrames = 0;
+            }
             pollInput();
             while (acc >= STEP) {
                 step(STEP);
                 acc -= STEP;
             }
-            if (opt.autoplay && mode == Mode::GameOver && modeT > 2) startGame();
+            if (opt.autoplay && mode == Mode::GameOver && gameoverTimer < -2) startGame();
             render();
         }
-        if (score > hiscore) hiscore = score;
-        saveHigh();
     }
 };
 
@@ -1528,6 +1455,7 @@ int main(int argc, char** argv) {
             return a == "--help" || a == "-h" ? 0 : 1;
         }
     }
+    if (std::getenv("PRISM_NO_RUMBLE")) g.opt.rumble = false;
     if (!g.init()) return 1;
     g.run();
     g.shutdown();

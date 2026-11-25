@@ -1,7 +1,9 @@
-# PRISM
+# PRISM ARENA
 
-A neon twin-stick arena shooter in C++17 on SDL3. It has a spring-mass warping grid, bloom,
-synthesized sound effects and music, and gamepad rumble.
+A neon twin-stick arena shooter in C++17 on SDL3: a port of the Python/pygame
+[prism-arena](../prism-arena). It has a spring-mass warping grid, bloom, synthesized sound
+effects, and gamepad rumble. On top of the Python version it adds a sequenced music loop and stereo
+panning.
 
 ## Build & run
 
@@ -24,25 +26,29 @@ missing). If no Conan build is present, the Makefile uses a system SDL3 (`libsdl
 | Aim & fire | Right stick | Hold LMB (aim with mouse) or arrow keys |
 | Bomb | LB / RB / LT / RT | Space / RMB |
 | Pause | Start | Esc |
-| Confirm | A | Enter |
-| Back / quit to title | Back (or B) | Esc / Q (when paused) |
+| Start / continue | A (or Start) | Enter |
+| Quit to title (paused) / quit (title) | Back | Q / Esc |
 | Music on/off | Y | M |
 | Fullscreen | | F11 / Alt+Enter |
+| FPS counter | | F3 |
+
+`--fullscreen` (`-f`) and `--no-rumble` (or `PRISM_NO_RUMBLE=1`) work as in the Python version.
 
 ## Enemies
 
 | | |
 |---|---|
-| Drifter (amber triangle) | Wanders around, drifting slowly toward you |
-| Seeker (magenta kite) | Homes in on you |
-| Weaver (green hexagon) | Sidesteps your bullets |
-| Splitter (orange star) | Breaks into three spiralling Shards |
-| Lancer (red needle) | Takes aim (watch the dotted line), then dashes across the arena. Takes 2 hits |
-| Singularity (violet rings) | A gravity well. Pulls in you, your shots, and other enemies. Takes 16 hits. If it absorbs 10 enemies it bursts into Seekers |
+| Drifter (cyan hexagon) | Wanders around, drifting slowly toward you |
+| Seeker (orange arrowhead) | Homes in on you |
+| Weaver (lime hourglass) | Zig-zags toward you and sidesteps your bullets |
+| Splitter (magenta pentagon) | Takes 2 hits, then shatters into three fast Shards |
+| Lancer (yellow star) | Lines up a shot (watch the line), then dashes straight at you |
+| Singularity (red rings) | A gravity well that pulls you and bends your shots. Takes 16 hits. Left alone for 22 s, it bursts into eight Shards |
 
-Every kill builds your streak. The multiplier rises to X10 and resets when you die. At X3 your
-gun becomes a 3-way spread; at X6 it gets 4 streams and a faster fire rate. You get extra lives
-at 100k, 200k, 400k… and extra bombs at 75k, then every 150k.
+Every kill builds your streak, and the multiplier rises to X10. Dying resets the streak. The gun
+upgrades at 25k, 90k and 250k points, up to five streams, and keeps its upgrades when you die. You
+get an extra life every 75k and an extra bomb every 100k. A bomb sends out a shockwave that
+destroys, and scores, everything it reaches.
 
 ## Testing
 
