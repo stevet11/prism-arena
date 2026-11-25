@@ -1,0 +1,96 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            conan_args: >-
+              -c tools.system.package_manager:mode=install
+              -c tools.system.package_manager:sudo=True
+            configure_preset: conan-release
+            exe: prism
+          - name: windows-x64
+            os: windows-latest
+            conan_args: -s compiler.runtime=static
+            configure_preset: conan-default
+            exe: prism.exe
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Conan
+        run: |
+          pip install "conan>=2.0,<3"
+          conan profile detect --force
+
+      - name: Refresh apt package lists
+        if: runner.os == 'Linux'
+        run: sudo apt-get update
+
+      # Built packages (SDL, PulseAudio, Wayland, ...) take a while to compile.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.conan2/p
+          key: conan-${{ matrix.name }}-${{ hashFiles('conanfile.py') }}
+          restore-keys: conan-${{ matrix.name }}-
+
+      - name: Install dependencies (Conan)
+        run: conan install . --build=missing -s build_type=Release -s compiler.cppstd=17 ${{ matrix.conan_args }}
+
+      - name: Build
+        run: |
+          cmake --preset ${{ matrix.configure_preset }}
+          cmake --build --preset conan-release
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/prism-${{ matrix.name }}
+          cp build/Release/${{ matrix.exe }} README.md dist/prism-${{ matrix.name }}/
+          tar -C dist -czf prism-${{ matrix.name }}.tar.gz prism-${{ matrix.name }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/prism-${{ matrix.name }} | Out-Null
+          Copy-Item build/Release/${{ matrix.exe }}, README.md dist/prism-${{ matrix.name }}/
+          Compress-Archive -Path dist/prism-${{ matrix.name }} -DestinationPath prism-${{ matrix.name }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-${{ matrix.name }}
+          path: prism-${{ matrix.name }}.*
+
+  # Pushing a tag like v1.0.0 publishes both builds as a GitHub release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --repo "${{ github.repository }}" --generate-notes

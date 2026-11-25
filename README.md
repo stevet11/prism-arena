@@ -7,16 +7,30 @@ panning.
 
 ## Build & run
 
-SDL3 comes from [Conan](https://conan.io) 2, which builds it and links it in statically:
+SDL3 comes from [Conan](https://conan.io) 2, which builds it and links it in statically. With
+CMake (Linux or Windows):
 
 ```sh
-conan install . --build=missing -of build/conan   # once, or after changing conanfile.txt
-make && ./prism            # --fullscreen, --no-rumble
+conan install . --build=missing -s compiler.cppstd=17
+cmake --preset conan-release        # on Windows (Visual Studio): cmake --preset conan-default
+cmake --build --preset conan-release
+build/Release/prism                 # --fullscreen, --no-rumble
+```
+
+Or with the Makefile (Linux):
+
+```sh
+conan install . --build=missing -of build/conan   # once, or after changing conanfile.py
+make && ./prism
 ```
 
 On Linux, ConanCenter's `xorg/system` package needs the X11/XCB dev headers installed first
 (on Ubuntu, the `libx11-dev` and `libxcb-*-dev` packages; `conan install` names any that are
 missing). If no Conan build is present, the Makefile uses a system SDL3 (`libsdl3-dev`) instead.
+
+GitHub Actions ([.github/workflows/build.yml](.github/workflows/build.yml)) builds Linux and
+Windows binaries on every push and keeps them as workflow artifacts. Pushing a `v*` tag also
+publishes them as a GitHub release.
 
 ## Controls
 
