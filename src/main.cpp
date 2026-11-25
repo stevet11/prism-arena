@@ -1308,10 +1308,11 @@ struct Game {
         drawText(dr, commas(score), {40, 42}, 26, WHITE);
         drawText(dr, "X" + std::to_string(multiplier()), {42, 82}, 16, rgb(255, 220, 120));
         drawText(dr, "HI " + commas(std::max(hiscore, score)), {W - 40.f, 44}, 16, rgb(180, 200, 255), 1);
+        // lives fill leftward and bombs rightward from the centre, so they never meet
         for (int i = 0; i < std::min(lives, 8); ++i)
-            dr.poly(SH_PLAYER, {W / 2.f - 120 + i * 30, 52}, -PI / 2, 0.75f, 1.6f, rgb(235, 245, 255));
+            dr.poly(SH_PLAYER, {W / 2.f - 30 - i * 30, 52}, -PI / 2, 0.75f, 1.6f, rgb(235, 245, 255));
         for (int i = 0; i < std::min(bombs, 8); ++i) {
-            V2 c{W / 2.f + 60 + i * 26, 52};
+            V2 c{W / 2.f + 30 + i * 26, 52};
             dr.circle(c, 9, 1.4f, rgb(255, 200, 90), 24);
             dr.dot(c, 4.5f, rgb(255, 200, 90));
         }
