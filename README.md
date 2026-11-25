@@ -5,6 +5,15 @@ A neon twin-stick arena shooter in C++17 on SDL3: a port of the Python/pygame
 effects, and gamepad rumble. On top of the Python version it adds a sequenced music loop and stereo
 panning.
 
+![Gameplay: splitters shattering near the player at multiplier X9](docs/screenshots/gameplay.png)
+
+| | |
+|---|---|
+| ![Title screen](docs/screenshots/title.png) | ![A Singularity pulling the grid while a bomb is collected](docs/screenshots/singularity.png) |
+| Title screen | A Singularity (red rings) bending the grid |
+| ![A crowded late game with a lancer wave](docs/screenshots/late-game.png) | |
+| Late game: lancers, weavers and splitters | |
+
 ## Build & run
 
 SDL3 comes from [Conan](https://conan.io) 2, which builds it and links it in statically. With
