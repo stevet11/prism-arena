@@ -68,3 +68,7 @@ destroys, and scores, everything it reaches.
 
 `--autoplay` lets a bot play. `--shot out.bmp --shot-at 30` saves a frame at 30 s and exits.
 Test modes never open the gamepad, so they never rumble it.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
